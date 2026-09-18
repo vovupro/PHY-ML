@@ -1,0 +1,29 @@
+﻿# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Temporary & checkpoint files
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# IDE & Editor settings
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+archive/
+results/
+*.log
+desktop.ini

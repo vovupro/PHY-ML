@@ -1,0 +1,291 @@
+RÀ SOÁT TÀI LIỆU VÀ ĐỀ XUẤT ML CHO AMC
+Ngày đối chiếu: 11/09/2026
+
+KẾT QUẢ ĐỀ XUẤT
+
+Tôi đề xuất ba mô hình phổ thông cho nhánh học trực tiếp action: Decision Tree classifier (CART), Random Forest classifier và kNN classifier. DT là ứng viên chính cần nghiên cứu; RF và kNN là đối chứng ML. Đây là lựa chọn để thực nghiệm, không phải kết luận DT tốt nhất hay ba mô hình chắc chắn đạt BER mục tiêu.
+
+RF hồi quy đang có trong core vẫn hợp lệ cho hướng “dự đoán chất lượng từng action rồi lựa chọn”. Không cần loại bỏ nó vì khác DT. Nếu giữ so sánh này, câu hỏi là so sánh hai cách xây dựng policy; nếu muốn tách riêng ảnh hưởng của thuật toán, cần DT và RF cùng dạng phân loại hoặc cùng dạng hồi quy. Không tự động thay RF hiện tại trong lượt nghiên cứu này.
+
+Căn cứ lựa chọn được tách thành hai phần: tài liệu nền tảng hướng dẫn sử dụng thuật toán; bài AMC chứng minh cách đặt bài toán đã có tiền lệ. Không bài riêng lẻ nào đóng vai trò manual đầy đủ cho toàn bộ giao tiếp ML–AMC của core.
+
+1. PHẠM VI VÀ CÁCH RÀ SOÁT
+
+Nguồn đầu vào là PHUONG_PHAP_LUAN_VA_THAM_KHAO.md và các dẫn chiếu trong mã nguồn. Tôi truy ngược các tên bài, sửa định danh nhầm, và tra đủ 18 mục trong bibliography của Borst vì file .md tuyên bố tham khảo cả danh mục nhưng chỉ mô tả một phần. Danh sách R01–R32 gồm bài báo, sách, luận văn, tiêu chuẩn và manual; SoftRate được tách khỏi bài Judd bị gán nhầm tên.
+
+Tìm kiếm mở rộng theo các hướng: supervised link adaptation; kNN/SVM/decision tree/random forest cho AMC; adaptive LDPC; dự đoán BER/BLER; contextual bandit; đánh giá mô hình trên dữ liệu bảng. Ưu tiên bài gốc, trang nhà xuất bản, bản tác giả, kho trường đại học và tài liệu thư viện chính thức. Đối chiếu nhiệm vụ học, nhãn, thông tin đầu vào, kênh, đối chứng, đánh giá và giới hạn suy luận.
+
+Đây là rà soát tài liệu có đối chiếu phê bình theo phạm vi đề tài, không phải systematic review với quy trình tìm kiếm tái lập đầy đủ hoặc thống kê tỷ lệ sử dụng toàn ngành. Vì vậy, có thể kết luận một họ phương pháp có tiền lệ và được hướng dẫn rộng rãi; chưa thể xếp hạng “được dùng nhiều nhất” bằng số liệu thư mục.
+
+Mức truy cập ghi tại từng mục:
+A = truy cập được toàn văn, đối chiếu các phần liên quan; không có nghĩa đọc mọi trang sách hay tái lập thí nghiệm.
+B = chỉ có abstract, metadata hoặc trích đoạn được lập chỉ mục; không dùng làm căn cứ quyết định duy nhất.
+C = sách/tiêu chuẩn/manual: đối chiếu danh tính, phạm vi và phần liên quan, không kiểm toán toàn bộ tài liệu.
+
+Không chạy code, train, benchmark hoặc dùng điểm số hiện tại để chọn mô hình. Không sửa PHY, code hay file .md. Một số nhận xét dưới đây là giới hạn của bằng chứng công bố, không phải kết luận code tác giả có lỗi.
+
+2. ĐỀ XUẤT Ở TẦNG 2
+
+2.1 Câu hỏi nghiên cứu nên chốt
+
+“Với cùng thông tin có trước quyết định truyền, cùng tập action và mục tiêu đánh giá, các mô hình học có giám sát phổ thông chưa tinh chỉnh riêng tạo ra policy AMC có hiệu năng và chi phí như thế nào so với đối chứng?”
+
+Nếu chọn nhánh direct classification, nhiệm vụ học là bắt chước policy tham chiếu theo các nhãn đã định nghĩa. Accuracy đo mức khớp nhãn; hiệu quả AMC phải đo bằng BER, goodput và chi phí. Sai một lớp không luôn gây cùng tổn thất, nên accuracy cao không đồng nghĩa goodput tối ưu. Việc giới hạn tuyên bố như vậy cho phép giữ baseline hợp lệ kể cả khi kết quả thấp.
+
+2.2 Vai trò ba mô hình
+
+- DT/CART: mô hình đơn giản để khảo sát khả năng chia miền trạng thái thành các quyết định. Có đường đi quyết định có thể truy vết. Chọn nó vì cấu trúc và mục tiêu nghiên cứu; không cần viện dẫn một định lý rằng cây đơn luôn ngang mô hình phức tạp. Manual: tài liệu cây của scikit-learn; tiền lệ AMC gần: R04, với lưu ý C4.5 khác CART.
+- RF classifier: đối chứng nhiều cây trên cùng đầu vào và nhãn. Giúp xem việc tổng hợp cây mang lại gì so với cây đơn, với chi phí thực đo. Không loại trước vì giả định “RF quá chậm”. Nền tảng: N09, M03; các ứng dụng gần: R06, R23.
+- kNN classifier: đối chứng dựa trên mẫu lân cận, khác cơ chế chia miền của cây. Có tiền lệ trực tiếp lâu đời trong link adaptation và bài LDPC gần đề tài: R03, N01. Fit đơn giản nhưng lưu trữ và truy vấn không miễn phí; đo chi phí dự đoán trên kích thước dữ liệu thực tế.
+
+Đây là ba lựa chọn có lý do độc lập, không phải quét hàng loạt model rồi chỉ báo cáo model thắng. Không cần thiết lập nhiều kiến trúc neural network để chứng minh ML nhẹ có giá trị.
+
+2.3 Vì sao chưa đưa các họ khác vào bộ chính
+
+- SVM: có tiền lệ đáng kể (N02). Tuy nhiên kernel, C, gamma và biểu diễn dữ liệu làm phát sinh nhiều lựa chọn hơn cho mục tiêu baseline tối giản. Đó là lý do ưu tiên thấp hơn trong phạm vi này, không phải SVM kém hoặc thiếu uy tín.
+- GBDT/HistGradientBoosting: ứng viên hợp lý cho dữ liệu bảng (N08), nhưng thêm một họ ensemble và thêm lựa chọn điều chỉnh. Chưa có bằng chứng trong tập bài đã đọc buộc phải thay RF bằng GBDT cho core này. Có thể dành cho giai đoạn mở rộng đã định trước.
+- Logistic regression: đặc biệt đáng cân nhắc nếu câu hỏi là dự đoán xác suất lỗi khối rồi chọn action (N05). Phải phân biệt BLER với BER; không đổi tên đại lượng để áp dụng cùng một công thức.
+- Bandit/RL: có cả phương pháp nhẹ (R16, R19, N06). Chúng giải quyết học từ tương tác và đánh đổi thăm dò, đòi hỏi đánh giá theo trình tự. Đưa vào bây giờ sẽ mở thêm câu hỏi nghiên cứu, chứ không chỉ thay một classifier.
+- CNN/LSTM và các phương pháp online chuyên biệt: hữu ích khi thông tin và nhiệm vụ tương ứng (R18, R20, R21). Slow/fast Rayleigh tự nó không bắt buộc phải dùng LSTM. Model tĩnh có thể nhận trạng thái có sẵn; khả năng thích nghi bị giới hạn bởi thông tin đó, không được mặc định biết tương lai.
+
+2.4 Quan hệ với RF hồi quy hiện tại
+
+Đọc tĩnh policies.py xác nhận RandomForestRegressor dự đoán các đại lượng lỗi, trong khi DecisionTreeClassifier chọn action trực tiếp. Do đó có hai phép so sánh khác nhau:
+
+(a) So sánh thuật toán trong cùng công thức bài toán: DT classifier, RF classifier, kNN classifier.
+(b) So sánh cách xây dựng policy: direct classifier với predict-then-optimize, chẳng hạn RF regressor hiện tại.
+
+Cả hai đều được phép. Phép (b) không cô lập đóng góp của riêng họ DT/RF. Nếu mục tiêu cần thay target BER hoặc ràng buộc runtime mà không tạo lại nhãn, cách dự đoán từng action rồi tối ưu có lợi thế về sự linh hoạt ở giao tiếp; độ chính xác thực tế vẫn phải đo. Không nên bỏ hướng này chỉ để bảng so sánh trông đồng nhất.
+
+2.5 “Non-optimize” và kiểm thử đi kèm
+
+Baseline chưa tinh chỉnh riêng vẫn cần xác định thuật toán, biến đầu vào, biểu diễn biến, đại lượng cần học và cấu hình hợp lệ trước đánh giá. Những điều đó là thiết lập phương pháp. Không đồng nhất “chưa tối ưu” với giữ mọi default thư viện hoặc sao chép depth/k từ một bài khác.
+
+Giữ test độc lập; dùng train/validation hoặc CV trong phần phát triển theo vai trò đã chốt. CV có thể ước lượng sự biến thiên của một cấu hình cố định, không bắt buộc dùng để tìm cấu hình thắng. Cách chia cần xét đơn vị độc lập: các hàng chung một hiện thực kênh, burst hoặc chuỗi không mặc nhiên là các mẫu độc lập. Tài liệu M05 hướng dẫn các lựa chọn phổ thông này.
+
+Nếu triển khai nhánh tối ưu sau đó, xác định trước phạm vi tìm kiếm, ngân sách và cách lựa chọn; tách kết quả của nó khỏi baseline. Một test đã dùng để ra quyết định sửa mô hình không còn là bằng chứng test chưa được sử dụng cho thiết kế mới.
+
+Không dùng “accuracy phải cao”, “nhãn phải ổn định 90%” hoặc “AI phải hơn LUT” làm điều kiện baseline được phép đánh giá. Tính hợp lệ được xét theo quy trình và nghĩa của bài toán; chất lượng được ghi nhận sau. Holdout/CV không tự kiểm chứng ý nghĩa nhãn, phép tính BER hay thời điểm thông tin đầu vào có sẵn.
+
+Đối chứng ngoài ML vẫn cần fixed robust, fixed high-throughput và AMC phi-ML như LUT/ngưỡng. Nếu dùng DEFER/gate, phải công khai quyền hành động và thông tin của từng policy, tính cả cơ hội không truyền trong goodput. Cùng gate có thể làm cả nhóm được lợi; không quy phần lợi đó thành năng lực riêng của classifier. Không cần đưa Minstrel/OLLA đầy đủ vào core nếu chưa mô hình hóa đúng feedback, retry và thời gian của chúng.
+
+3. ĐỐI CHIẾU TẤT CẢ MỤC TÀI LIỆU TRONG PHẠM VI PROJECT
+
+R01. Robert G. Sargent (2013), Verification and validation of simulation models. Journal of Simulation 7, 12–24. Mức A.
+Phân biệt các đối tượng cần xác minh và đánh giá độ phù hợp của mô phỏng. Không hướng dẫn chọn DT/RF hay cung cấp một phép chứng nhận model ML. File .md có dẫn bài này, nhưng người dùng đã xác nhận không chọn Sargent làm khung nghiên cứu; không tự áp đặt trở lại.
+Nguồn: [Bài gốc PDF](https://ics-websites.science.uu.nl/docs/vakken/msosi/VerificationValidationSargent.pdf).
+
+R02. Andreas Maurer, Massimiliano Pontil (2009), Empirical Bernstein Bounds and Sample Variance Penalization. COLT. Mức A.
+Cận tập trung khai thác phương sai mẫu dưới các giả thiết toán học về biến quan sát. Có liên quan đến lượng hóa bất định, không chỉ định mô hình AMC hay một số frame bắt buộc. Việc chọn đơn vị mẫu, tính độc lập và đại lượng được chặn phải phù hợp trước khi áp dụng; danh tiếng bất đẳng thức không tự xác nhận cách dùng trong code.
+Nguồn: [Bài và PDF tác giả](https://arxiv.org/abs/0907.3740).
+
+R03. Robert C. Daniels, Constantine M. Caramanis, Robert W. Heath Jr. (2010), Adaptation in Convolutionally Coded MIMO-OFDM Wireless Systems Through Supervised Learning and SNR Ordering. IEEE TVT 59(1), 114–126. Mức A, bản tác giả.
+Dùng kNN với đặc trưng SNR sau xử lý được sắp thứ tự. Quan sát lỗi qua nhiều gói cho từng kênh/mode, lựa chọn rate với ràng buộc FER; thử trên dữ liệu kênh mới. Đây là tiền lệ mạnh cho supervised link adaptation. Không phải bài DT; cũng không xác nhận một conditional oracle chính xác cho BER 10^-3 của core. k và lựa chọn đặc trưng của bài có khảo sát riêng. DOI đúng: 10.1109/TVT.2009.2029693, khác DOI trong .md.
+Nguồn: [Bản tác giả](https://users.ece.utexas.edu/~cmcaram/pubs/MIMO-OFDM-Adaptation.pdf).
+
+R04. Hui Liu, J. He, J. Wensowitch, D. Rajan, J. Camp (2020), Architecture and experimental evaluation of context-aware adaptation in vehicular networks. EURASIP JWCN, 49. Mức A.
+Dùng cây C4.5 với SNR, vận tốc, loại kênh; nhãn dựa trên mode đạt throughput cao trong điều kiện khảo sát. Có đo trên nền tảng vô tuyến, giả lập kênh và môi trường thực, triển khai quyết định qua LUT. Hữu ích cho direct classification và kiểm tra hệ thống. C4.5 không phải CART của scikit-learn. Không thể kế thừa nguyên trạng mục tiêu throughput thành bảo đảm BER 10^-3 hoặc khẳng định giảm năng lượng mà chưa đo.
+Nguồn: [Toàn văn, mục 2.2 và 4](https://link.springer.com/article/10.1186/s13638-020-01668-7).
+
+R05. Luca Borst và cộng sự (2026), Lightweight CFR-Based Modulation Adaptation in a Real-Time MIMO-OFDM SDR Testbed. arXiv:2609.00903v1, 01/09/2026. Mức A; preprint, chưa xác nhận phản biện xuất bản.
+So sánh DT/RF/kNN trên đặc trưng CFR; chia 80/20 và CV để lựa chọn cấu hình. Mục III-C dùng nhãn modulation đã phát, không phải nhãn mode tối ưu từ đánh giá mọi action. depth 7 là lựa chọn của thí nghiệm; triển khai DT 10 Hz trong LoS trong nhà đứng yên. Không có phép đo chứng minh RF vượt deadline một frame. Bài hỗ trợ khả năng triển khai cây gọn, không xác nhận tối ưu goodput hoặc fast Rayleigh của core.
+Nguồn: [Toàn văn, III-C, IV và kết luận](https://arxiv.org/html/2609.00903v1).
+
+R06. Lefteris Tsipi và cộng sự (2024), Machine learning-based methods for MCS prediction in 5G networks. Telecommunication Systems 86, 705–728. Mức A.
+So sánh RF classifier, Bagging-kNN, SVM và ANN; không có thí nghiệm DT đơn như .md mô tả. Dữ liệu WinProp, bối cảnh đô thị tĩnh; nhãn theo ngưỡng SINR định trước. Chia 70/15/15, có tìm tham số. Đo khớp MCS theo luật gán nhãn không tương đương chứng minh một policy cải thiện link. Phần mô tả tiền xử lý/chọn biến chưa đủ rõ để xác nhận mọi bước được fit riêng trên train; không từ đó kết luận chắc chắn có leakage trong triển khai.
+Nguồn: [Toàn văn, mục 4–5](https://link.springer.com/article/10.1007/s11235-024-01158-x).
+
+R07. 3GPP TS 38.212, NR; Multiplexing and channel coding, Release 16/17. Mức C.
+Tiêu chuẩn coding/multiplexing, có các thành phần CRC và LDPC. Đây là căn cứ PHY, không phải manual ML. Dẫn “Release 16/17” chưa xác định một phiên bản kỹ thuật duy nhất. Lượt này không kiểm tra lại tính tuân thủ của PHY.
+Nguồn: [Hồ sơ đặc tả chính thức và các phiên bản](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=3214).
+
+R08. Jakob Hoydis và cộng sự (2022), Sionna: An Open-Source Library for Next-Generation Physical Layer Research. arXiv:2203.11854. Mức A.
+Thư viện nghiên cứu PHY có thể làm đối chiếu triển khai. Bài giới thiệu công cụ không xác nhận cấu hình DT/RF, nhãn hay thiết kế thí nghiệm của một project khác. Đối chiếu một số khối với Sionna không chứng minh toàn bộ simulator không có bug.
+Nguồn: [Bài gốc](https://arxiv.org/abs/2203.11854); [tài liệu thư viện](https://nvlabs.github.io/sionna/).
+
+R09. John C. Bicket (2005), Bit-rate Selection in Wireless Networks. Luận văn thạc sĩ MIT. Mức A.
+SampleRate lựa chọn rate theo thời gian truyền dự kiến, kèm thử các rate khác. Có giá trị về đối chứng rate adaptation và chi phí probing. Đây là luận văn, không phải bài báo phản biện. Không suy ra mọi triển khai Minstrel là SampleRate nguyên trạng hoặc probing luôn thất bại trong fading nhanh.
+Nguồn: [Luận văn MIT](https://pdos.csail.mit.edu/papers/jbicket-ms.pdf).
+
+R10. Starsky H. Y. Wong, Hao Yang, Songwu Lu, Vaduvur Bharghavan (2006), Robust rate adaptation for 802.11 wireless networks. ACM MobiCom, 146–157. Mức B.
+RRAA xét thống kê mất gói và cơ chế phân biệt ảnh hưởng va chạm. Là đối chứng lịch sử cho bài toán Wi-Fi có MAC; không phải căn cứ chọn một classifier. Chưa đọc được toàn văn ổn định trong lượt này, nên không kế thừa con số hiệu năng hay tham số cửa sổ từ nguồn thứ cấp.
+Nguồn: [DOI nhà xuất bản](https://doi.org/10.1145/1161089.1161107); [danh mục của tác giả](https://web.cs.ucla.edu/~slu/papers.html).
+
+R11. Joseph Camp, Edward Knightly (2010), Modulation Rate Adaptation in Urban and Vehicular Environments: Cross-Layer Implementation and Experimental Evaluation. IEEE/ACM Transactions on Networking. Mức A, bản tác giả.
+Đánh giá rate adaptation trong môi trường di động qua nền tảng thực nghiệm và kênh có kiểm soát. Cho thấy điều kiện biến thiên kênh và cách đo chất lượng link ảnh hưởng lựa chọn rate. Không chứng minh mọi model chỉ có SNR sẽ thất bại hoàn toàn, hay channel_id là đầu vào bắt buộc cho mọi simulator.
+Nguồn: [Bản tác giả](https://s2.smu.edu/~camp/pubs/camp_ton2010.pdf), DOI 10.1109/TNET.2010.2051454.
+
+R12. Glenn Judd, Xiaohui Wang, Peter Steenkiste (2008), Efficient Channel-aware Rate Adaptation in Dynamic Environments. ACM MobiSys. Mức A, bản tác giả.
+Đây là CHARM, khai thác thông tin chất lượng kênh và tính tương hỗ; không phải SoftRate. File .md đã ghép tên thuật toán và mô tả từ hai công trình khác nhau. Không dùng mục này để chứng minh lợi ích của soft LLR.
+Nguồn: [Bài CHARM](https://www.cs.cmu.edu/~glennj/JuddMobisys.pdf).
+
+R13. Mythili Vutukuru, Hari Balakrishnan, Kyle Jamieson (2009), Cross-Layer Wireless Bit Rate Adaptation. ACM SIGCOMM. Mức A.
+Đây mới là SoftRate: dùng độ tin cậy SoftPHY để ước lượng lỗi và hỗ trợ chọn rate. Nếu vận dụng ý tưởng làm feature, phải xác định thông tin được quan sát lúc nào. LLR của payload vừa giải mã không có sẵn trước khi chọn mode cho chính payload đó. Bài không cấp quyền sử dụng thông tin tương lai.
+Nguồn: [Bài SoftRate](https://cs.uwaterloo.ca/~brecht/courses/856/readings/rate-adaptation/softrate-sigcomm-2009.pdf).
+
+R14. Jongseok Kim, Seongkwan Kim, Sunghyun Choi, Daji Qiao (2006), CARA: Collision-Aware Rate Adaptation for IEEE 802.11 WLANs. IEEE INFOCOM. Mức A.
+Kết hợp thông tin collision và điều chỉnh rate, với cơ chế MAC như RTS/CTS. Bài hữu ích để hiểu vì sao packet loss không chỉ do nhiễu kênh. Không phải manual chọn ML; core không mô phỏng collision không cần thêm CARA chỉ vì có trong lịch sử ngành.
+Nguồn: [Bản tác giả](https://home.engineering.iastate.edu/~daji/papers/infocom2006.pdf).
+
+R15. F. Blanquez-Casado và cộng sự (2016), eOLLA: an enhanced outer loop link adaptation for cellular networks. EURASIP JWCN, 20. Borst [1]. Mức A.
+Phân tích và cải tiến thích nghi vòng ngoài, gồm điều chỉnh bước và quá trình hội tụ hướng đến BLER mục tiêu. Là bằng chứng một phương pháp phi-ML cũng có thể cải thiện thích nghi. Không hỗ trợ kết luận “OLLA chậm nên buộc dùng ML”, càng không bảo đảm một DT sẽ xử lý deep fade tốt hơn.
+Nguồn: [Toàn văn](https://link.springer.com/article/10.1186/s13638-016-0518-3).
+
+R16. M. P. Mota và cộng sự (2019), Adaptive Modulation and Coding Based on Reinforcement Learning for 5G Networks. IEEE Globecom Workshops. Borst [2]. Mức A, bản tác giả.
+Q-learning lựa chọn MCS từ trạng thái CQI, với reward gắn hiệu suất phổ và lỗi; đối chiếu link adaptation truyền thống. Cho thấy RL không nhất thiết là mạng sâu. Tuy nhiên đây là học tương tác, không phải thay classifier trong một quy trình offline mà giữ nguyên cách đánh giá.
+Nguồn: [Bản tác giả](https://arxiv.org/abs/1912.04030).
+
+R17. K. K. Mohan, S. S. Das, P. Ray (2019), Link Adaptation Schemes Based on Parametric Estimation of SNR Distribution Over Nakagami-m Fading Channels. IEEE Transactions on Communications 67(2), 1537–1553. Borst [3]. Mức B.
+Ước lượng tham số phân bố SNR để phục vụ thích nghi. “ML” trong ngữ cảnh maximum likelihood cần phân biệt với machine learning classifier. Chưa có toàn văn đủ để đối chiếu mọi điều kiện và tham số, nên chỉ dùng xác định nhánh nghiên cứu, không dùng như manual cho RF/DT.
+Nguồn: [DOI bài gốc](https://doi.org/10.1109/TCOMM.2018.2875725); [mục lục IEEE ComSoc](https://www.comsoc.org/system/files/2019-02/Publications_Contents_Digest_2019_Feb.pdf).
+
+R18. E. Bobrov, D. Kropotov, H. Lu, D. Zaev, Massive MIMO Adaptive Modulation and Coding Using Online Deep Learning Algorithm. Preprint 2021; IEEE Communications Letters 26(4), 818–822, 2022. Borst [4]. Mức A, preprint.
+Mạng học từ policy ban đầu rồi cập nhật với phản hồi trong hệ thống massive MIMO. Hữu ích cho hướng online khi môi trường/thiết bị làm ánh xạ chuẩn sai lệch. Không chứng minh cần mạng sâu cho dữ liệu ba biến của core. Cần phân biệt năm preprint với năm tập tạp chí.
+Nguồn: [Bản tác giả](https://arxiv.org/abs/2105.12827); [bản xuất bản](https://ieeexplore.ieee.org/document/9638462/).
+
+R19. D. G. S. Pivoto và cộng sự (2026), Contextual Bandit-Based AMC for Quasi-Stationary Wireless Backhaul Links on SDR Platforms. IEEE Open Journal of the Communications Society 7, 5642–5670. Borst [5]. Mức A, bản tác giả được chấp nhận.
+Dùng ngữ cảnh SNR và quan sát goodput cho từng MCS, với thăm dò và bảng quyết định; môi trường backhaul quasi-stationary. Có đối chứng ILLA, OLLA và mô hình HGBR. Goodput ở đây gắn hệ thống MAC, không đồng nhất BER. Đây là tiền lệ học policy từ hiệu năng, không phải căn cứ rằng mọi classifier phải có DEFER hoặc suy luận nhanh trong kênh bất kỳ.
+Nguồn: [Bản tác giả](https://www.researchgate.net/publication/404794834_Contextual_Bandit-Based_AMC_for_Quasi-Stationary_Wireless_Backhaul_Links_on_SDR_Platforms), DOI 10.1109/OJCOMS.2026.3692574.
+
+R20. R. Wiesmayr, L. Maggi, S. Cammerer, J. Hoydis, F. Ait Aoudia, A. Keller (2025), SALAD: Self-Adaptive Link Adaptation. arXiv:2510.05784. Borst [6]. Mức A, preprint.
+Cập nhật từ ACK/NACK, dùng mô hình quan hệ chất lượng kênh–BLER và cơ chế thích nghi; có cấu phần teacher điều chỉnh tốc độ học. Không phải một model mặc định không còn lựa chọn kỹ sư, cũng không mặc nhiên là DNN. Không chuyển mục tiêu BLER dài hạn của bài thành bảo đảm BER 10^-3 của core. Danh tính tác giả không thay thế kiểm tra phạm vi phương pháp.
+Nguồn: [Toàn văn](https://arxiv.org/html/2510.05784v1).
+
+R21. Qing An và cộng sự (2023), ML-Based Feedback-Free Adaptive MCS Selection for Massive Multi-User MIMO. Asilomar, 157–161. Borst [7]. Mức A.
+Dùng CNN-LSTM và thông tin kênh uplink để chọn MCS downlink dựa trên tính tương hỗ; có dữ liệu nền tảng massive MIMO. Bài là phản ví dụ trực tiếp cho câu trong .md rằng chuyên gia “không bao giờ nạp toàn bộ ma trận H”. Tính phù hợp phụ thuộc nhiệm vụ và ngân sách, không có quy tắc phải luôn nén xuống ba biến.
+Nguồn: [Bài gốc](https://arxiv.org/abs/2310.13830); [PDF kho NSF](https://par.nsf.gov/servlets/purl/10542298).
+
+R22. Fatima Ismail và cộng sự (2025), Cognitive link adaptation via modulation scheme classification in narrowband networks under AWGN and SUI channel conditions. Scientific Reports 15, 27604. Borst [8]. Mức A.
+Thiết kế phân loại phân cấp, kết hợp DT, ensemble subspace kNN và neural network nhỏ cho các họ modulation cùng cấu hình liên quan. Đây không phải kết quả của một CART đơn. Có thông tin QoS và đặc trưng mô phỏng; cấu trúc nhãn/đầu vào khác bài chọn joint LDPC/MCS/iterations của core. Accuracy phân cấp không tự chứng nhận quyết định truyền thỏa BER trong mọi trạng thái.
+Nguồn: [Toàn văn PDF](https://www.nature.com/articles/s41598-025-12277-z.pdf).
+
+R23. Junhu Shao, Yishuo Liu, Xuxiao Du, Tianjiao Xie (2024), Adaptive Modulation Scheme for Soft-Switching Hybrid FSO/RF Links Based on Machine Learning. Photonics 11(5), 404. Borst [9]. Mức B.
+RF phục vụ lựa chọn modulation trong đường truyền lai quang không gian tự do/vô tuyến dưới điều kiện thời tiết. Có giá trị làm tiền lệ RF cho adaptation, nhưng môi trường và biến đầu vào khác Rayleigh của core. Trang nhà xuất bản bị giới hạn truy cập toàn văn; chỉ đối chiếu abstract và các đoạn được lập chỉ mục, không sao chép thông số huấn luyện.
+Nguồn: [Bài nhà xuất bản](https://www.mdpi.com/2304-6732/11/5/404).
+
+R24. David Tse, Pramod Viswanath (2005), Fundamentals of Wireless Communication. Cambridge University Press. Borst [10]. Mức C.
+Nền tảng kênh fading, thông tin kênh và hiệu năng vô tuyến; chương về mô hình kênh có liên quan đến thuật ngữ slow/fast fading. Không quy định model ML hoặc pipeline chia dữ liệu. Đối chiếu phần liên quan và trang sách tác giả, không tuyên bố kiểm toán toàn bộ nội dung sách.
+Nguồn: [Trang sách và các chương của tác giả](https://web.stanford.edu/~dntse/wireless_book.html).
+
+R25. National Instruments (2018), LabVIEW Communications MIMO Application Framework 1.5 Manual, Doc. 377799A-01. Borst [11]. Mức C, toàn văn có truy cập.
+Manual nền tảng MIMO/SDR và xử lý tín hiệu. Căn cứ về triển khai hệ thống của Borst, không phải khuyến nghị depth cây hay số estimator. Deadline của nền tảng này không tự trở thành deadline đo trên CPU của core.
+Nguồn: [Manual NI](https://download.ni.com/evaluation/rf/MIMO_Application_Framework_Manual_ver_1.5.pdf).
+
+R26. Andrea Goldsmith (2005), Wireless Communications. Cambridge University Press. Borst [12]. Mức C, mục lục và thông tin ấn bản.
+Sách nền tảng có chương adaptive modulation and coding. Xác nhận phạm vi tài liệu, không tuyên bố đã đọc lại toàn bộ sách. Không dùng sách làm bằng chứng một họ ML cụ thể thắng hay một feature encoding cụ thể hợp lệ.
+Nguồn: [Mục lục và phần đầu ấn bản 2005](https://assets.cambridge.org/052183/7162/frontmatter/0521837162_frontmatter.htm).
+
+R27. Thomas L. Marzetta, Erik G. Larsson, Hong Yang, Hien Quoc Ngo (2016), Fundamentals of Massive MIMO. Cambridge University Press. Borst [13]. Mức C, hồ sơ nhà xuất bản.
+Cơ sở massive MIMO, ước lượng kênh và xử lý nhiều anten. Đây là một mục thuộc danh sách 18 của Borst nhưng .md chưa phân tích cụ thể. Không phải nguồn lựa chọn classifier trong hệ thống PHY khác.
+Nguồn: [Trang sách](https://www.cambridge.org/core/books/fundamentals-of-massive-mimo/C43AF993A6DA7075EC5F186F6BAC914B).
+
+R28. Ronald W. Schafer (2011), What Is a Savitzky-Golay Filter? IEEE Signal Processing Magazine 28(4), 111–117. Borst [14]. Mức B, nội dung lập chỉ mục; tải PDF không ổn định.
+Giải thích lọc đa thức bình phương tối thiểu cục bộ và tính chất đáp ứng. Không hỗ trợ mệnh đề lọc sạch nhiễu mà giữ hoàn hảo mọi deep fade. Nếu dùng theo thời gian phải kiểm tra cửa sổ có đòi mẫu tương lai hay không. Chưa có lý do bắt buộc thêm bộ lọc này vào core.
+Nguồn: [PDF bài gốc được lưu tại trường](https://andrewd.ces.clemson.edu/courses/cpsc881/papers/Sch11_whatIsSG.pdf), DOI 10.1109/MSP.2011.941097.
+
+R29. Jiri Milos và cộng sự (2019), Improved RMS Delay Spread Estimation for mmWave Channels Using Savitzky–Golay Filters. Electronics 8(12), 1530. Borst [15]. Mức B, abstract và kho tác giả.
+Ứng dụng lọc trong ước lượng delay spread từ phép đo kênh mmWave. Lọc đáp ứng theo tần số cho mục tiêu này không tự chứng minh lọc chuỗi SNR thời gian sẽ cải thiện AMC nhanh. Không chuyển kết quả thành một bước tiền xử lý bắt buộc.
+Nguồn: [Kho trường và bản xuất bản](https://dspace.vut.cz/items/16c398d8-57f7-4fc5-8bbd-e15610e4f0ee), DOI 10.3390/electronics8121530.
+
+R30. Jack Good, Torin Kovach, Kyle Miller, Artur Dubrawski (2023), Feature Learning for Interpretable, Performant Decision Trees. NeurIPS 36, 66571–66582. Borst [16]. Mức A.
+Học đặc trưng kết hợp xây dựng cây có thành phần khả vi; phương pháp khác CART thông thường trên ba feature thủ công. Không chứng minh mọi cây đơn sau “nén đặc trưng” đều ngang black box, cũng không cấp bảo đảm diễn giải 100% cho core. Dùng đúng như một hướng nghiên cứu feature learning; không cần nó để biện minh cho baseline CART.
+Nguồn: [Bài tại hội nghị](https://proceedings.neurips.cc/paper_files/paper/2023/hash/d1b4076ae067dd23bad5ac2693547a01-Abstract-Conference.html).
+
+R31. Gareth James, Daniela Witten, Trevor Hastie, Robert Tibshirani, Jonathan Taylor (2023), An Introduction to Statistical Learning: with Applications in Python. Springer. Borst [17]. Mức C.
+Nguồn nền tảng phù hợp về supervised learning, đánh giá và các họ mô hình. Ấn bản Python có Jonathan Taylor; .md ghi tác giả thiếu và gọi ISLR chưa chính xác với ấn bản này. Các phương pháp chia dữ liệu không bắt nguồn duy nhất từ cuốn sách. Không có một depth hoặc tỷ lệ split bắt buộc cho AMC.
+Nguồn: [Trang sách tác giả](https://www.statlearning.com/); [tài nguyên Python](https://www.statlearning.com/resources-python).
+
+R32. Rajib Kumar Halder và cộng sự (2024), Enhancing k-nearest neighbor algorithm: a comprehensive review and performance analysis of modifications. Journal of Big Data 11, 113. Borst [18]. Mức A.
+Khảo sát các cải tiến tìm kiếm/láng giềng và hiệu năng. Hữu ích để hiểu chi phí kNN và các biến thể; không trực tiếp đánh giá AMC hay xác định k tốt nhất của core. Dùng kNN cơ bản không đòi áp dụng tất cả cải tiến trong khảo sát.
+Nguồn: [Toàn văn](https://link.springer.com/article/10.1186/s40537-024-00973-y).
+
+Các tên trong .md chưa đủ định danh một bài cụ thể:
+- “Ericsson & Nokia, IEEE TWC, UCB/Thompson Sampling”: thiếu tác giả, tên bài, năm, DOI. Không coi đây là một trích dẫn đã xác minh. N06 là nguồn mở rộng độc lập, không giả nhận chính là bài .md định nói tới.
+- EESM/MIESM/OLLA: tên họ phương pháp, không chỉ rõ tài liệu kỹ thuật và phiên bản. Không gắn mọi chi tiết triển khai với “chuẩn 3GPP” khi chưa có nguồn cụ thể.
+- Minstrel: thuật toán/triển khai cần phân biệt với các bài lịch sử. Nguồn bổ sung chính thức: [tài liệu Linux Wireless](https://wireless.docs.kernel.org/en/latest/en/developers/documentation/mac80211/ratecontrol/minstrel.html).
+- ISO/IEC 5338 và CRISP-DM được nhắc để thảo luận khung quy trình; chúng không phải bài đề xuất model ML cho core. Không chọn lại chúng thay phương pháp luận đã thống nhất.
+
+4. CÁC NGUỒN MỞ RỘNG CÓ LIÊN QUAN
+
+N01. Cong Xie, Mohammed El-Hajjar, Soon Xin Ng (2024; online 2023), Machine learning assisted adaptive LDPC coded system design and analysis. IET Communications 18(1), 1–10. Mức A.
+Rất gần đề tài: LDPC, kNN chọn modulation/coding, target BER 10^-3, xét thành phần fading chậm/nhanh và sai số kênh. Có đối chứng ILLA/OLLA. Mục 2.5 tạo dữ liệu Gaussian nhân tạo theo các ngưỡng BER, dùng k=20 và split 80/20; không phải manual cấu hình phổ quát. Phản biện của tôi: lượng tử hóa BER trong một frame ngắn không ngăn ước lượng BER trung bình qua nhiều frame. Bài là tiền lệ kNN phù hợp, nhưng không nên sao chép lập luận sinh nhãn này như chân lý.
+Nguồn: [Toàn văn](https://ietresearch.onlinelibrary.wiley.com/doi/full/10.1049/cmu2.12707).
+
+N02. Sungho Yun, Constantine Caramanis (2009), Multiclass Support Vector Machines for Adaptation in MIMO-OFDM Wireless Systems. Allerton, 1145–1152. Mức A.
+SVM đa lớp được xây dựng gắn chi phí/phần thưởng của link adaptation. Nêu rõ khác biệt giữa tối ưu classification accuracy và mục tiêu hiệu năng truyền. Không phải vanilla SVC cắm vào bất kỳ nhãn nào cũng hưởng các kết quả lý thuyết của bài. Có giá trị để giới hạn tuyên bố của direct classifier trong nghiên cứu này.
+Nguồn: [Bản tác giả](https://users.ece.utexas.edu/~cmcaram/pubs/YunCaramanis.MulticlassSVMAllerton.pdf), DOI 10.1109/ALLERTON.2009.5394863.
+
+N03. Robert Daniels, Robert W. Heath Jr. (2009), An Online Learning Framework for Link Adaptation in Wireless Networks. ITA, 138–140. Mức B.
+Được IEEE ComSoc Best Readings chọn như một công trình sớm về ML cho link adaptation; phần giới thiệu của ban tuyển chọn mô tả cập nhật bộ phân loại kNN từ đo đạc thực, và các nghiên cứu tiếp theo dùng SVM. Chưa đối chiếu toàn văn bài ITA trong lượt này, nên không lấy tham số thiết kế từ đây. Đây là dấu hiệu lựa chọn của chuyên gia, không phải chứng nhận thiết kế project.
+Nguồn: [Bài gốc](https://doi.org/10.1109/ITA.2009.5044935); [IEEE ComSoc Best Readings, mục Resource Allocation](https://www.comsoc.org/publications/best-readings/machine-learning-communications).
+
+N04. Lin Zhang, Zhiqiang Wu (2020), Machine Learning-Based Adaptive Modulation and Coding Design. Chương 9 trong Machine Learning for Future Wireless Communications, 157–180. Mức B.
+Chương chuyên khảo về supervised learning và RL cho AMC, gồm các hướng kNN/SVM trong hệ thống vô tuyến. Có ích như tài liệu dẫn nhập có chuyên gia biên soạn. Chỉ đối chiếu tóm tắt/phạm vi chương, không suy diễn một pipeline hay hyperparameter cụ thể chưa đọc được.
+Nguồn: [Chương Wiley-IEEE](https://onlinelibrary.wiley.com/doi/abs/10.1002/9781119562306.ch9); [kho tác giả](https://corescholar.libraries.wright.edu/ee/200/).
+
+N05. Carreras Mesa và cộng sự (2018), Link abstraction models for multicarrier systems: A logistic regression approach. International Journal of Communication Systems 31, e3436. Mức A, bản tác giả.
+Dùng logistic regression dự đoán BLER từ thống kê SINR, xét các MCS và kích thước khối. Tiền lệ quan trọng cho hướng mô hình nhẹ dự đoán hiệu năng trung gian. Không thể từ đó khẳng định RF dự đoán BER của core có cùng tính chất; BLER và BER là hai biến đích khác nhau. Không đề xuất đổi PHY của project theo bài này.
+Nguồn: [Bài nhà xuất bản](https://onlinelibrary.wiley.com/doi/full/10.1002/dac.3436); [PDF tác giả](https://riuma.uma.es/xmlui/bitstream/10630/33190/1/4%20PrePrint%20Link%20abstraction%20models.pdf).
+
+N06. Richard Combes, Alexandre Proutiere, Donggyu Yun, Jungseul Ok, Yung Yi (preprint 2013), Optimal Rate Sampling in 802.11 Systems. Mức A, bản tác giả.
+Khai thác cấu trúc bài toán bandit để lựa chọn rate, với đánh đổi thăm dò và throughput. Đây là căn cứ cụ thể hơn lời dẫn chung “chuyên gia dùng UCB/Thompson”. Mục tiêu online và phản hồi khác supervised offline. Không chuyển hindsight comparator của bandit thành giấy phép dùng kết quả tương lai làm feature khi quyết định truyền.
+Nguồn: [Bản tác giả](https://arxiv.org/abs/1307.7309).
+
+N07. Atakan Ozcan, Mohammed Al-Hubaishi (2026), EdgeMCSAdvisor: Real-time MCS Selection and Bitrate Guidance at the MEC Edge. Research Square preprint. Mức A; chưa dùng như kết quả phản biện đã xác nhận.
+So sánh mô hình dữ liệu bảng, gồm boosting, với nhãn liên quan MCS/modulation quan sát trong dataset. Có SINR/CQI/BLER/throughput counter. Độ chính xác dự đoán nhãn quan sát không tự chứng minh chọn được action tối ưu trước truyền; tính sẵn có theo thời gian của các counter cần được xác định. Đây là giới hạn suy luận, không kết luận chắc chắn tác giả có leakage.
+Nguồn: [Preprint gốc](https://doi.org/10.21203/rs.3.rs-8369395/v1).
+
+N08. Leo Grinsztajn, Edouard Oyallon, Gael Varoquaux (2022), Why do tree-based models still outperform deep learning on typical tabular data? NeurIPS, Datasets and Benchmarks. Mức A.
+Benchmark dữ liệu bảng với các mô hình cây/ensemble và neural network, có xét ngân sách tìm tham số. Hỗ trợ việc coi tree ensembles là ứng viên nghiêm túc cho dữ liệu bảng. Không chứng minh CART đơn luôn hơn DNN, không xếp hạng mọi mô hình năm 2026, và không thay thế đánh giá trên AMC. Kết quả đã tuning của bài không nên gán cho baseline chưa tuning của core.
+Nguồn: [Bài hội nghị](https://papers.neurips.cc/paper_files/paper/2022/hash/0378c7692da36807bdec87ab043cdadc-Abstract-Datasets_and_Benchmarks.html).
+
+N09. Leo Breiman (2001), Random Forests. Machine Learning 45, 5–32. Mức A.
+Nguồn nền tảng về ensemble cây, phân loại và hồi quy. Phù hợp để giải thích nguyên lý RF thay vì dựa vào một bài AMC để khẳng định độ uy tín thuật toán. Hiệu quả trên core không được bảo đảm bởi bài nền tảng. Khi mô tả implementation phải theo thư viện thực dùng; RF classifier scikit-learn tổng hợp xác suất lớp, khác mô tả đơn giản rằng mọi implementation chỉ bỏ phiếu nhãn cứng.
+Nguồn: [Bài của Breiman](https://stat-www.berkeley.edu/~breiman/randomforest2001.pdf); [trang tác giả](https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm).
+
+Các kết quả tìm kiếm bị loại khỏi căn cứ chọn model gồm công trình dùng ML cho nhận dạng modulation ở phía thu, ML cho caching/phân bổ UAV nhưng không chọn AMC, và báo cáo môn học không đủ bằng chứng xuất bản. Trùng từ “modulation”, “LDPC” hay “ML nhẹ” không có nghĩa cùng bài toán. Không dùng số bài tìm thấy để suy ra số đông khoa học.
+
+5. BỘ TÀI LIỆU “MANUAL” NÊN DỰA VÀO
+
+M01. Cây quyết định: [scikit-learn Decision Trees](https://scikit-learn.org/stable/modules/tree.html).
+Hướng dẫn CART, điều kiện dữ liệu và các lựa chọn độ phức tạp. max_depth=7, min_samples_leaf=12 hiện tại là cấu hình project, không phải một yêu cầu phổ quát. Xác suất lớp của cây mô tả phân bố nhãn học, không tự là BER của action được chọn.
+
+M02. kNN: [scikit-learn Nearest Neighbors](https://scikit-learn.org/stable/modules/neighbors.html).
+Lựa chọn khoảng cách, số láng giềng, thuật toán truy vấn và chi phí phụ thuộc dữ liệu. Với đầu vào khác đơn vị hoặc biến loại kênh, phải định nghĩa biểu diễn/khoảng cách phù hợp; mã số channel_id không tự có ý nghĩa khoảng cách vật lý. Thiết lập này thuộc cách dùng cơ bản, không nhất thiết là tối ưu sâu.
+
+M03. RF và boosting: [scikit-learn Ensemble methods](https://scikit-learn.org/stable/modules/ensemble.html).
+Phân biệt classifier/regressor và cách tổng hợp dự đoán. Số cây, độ sâu, kích thước lá là lựa chọn về cấu hình và tài nguyên; ghi cố định để tái lập. Không có quyền suy ra bất kỳ RF nào cũng vượt deadline hoặc một số cây nhất định là chuẩn AMC.
+
+M04. SVM: [scikit-learn Support Vector Machines](https://scikit-learn.org/stable/modules/svm.html).
+Hướng dẫn scale dữ liệu, kernel, regularization và chi phí. Cần phân biệt dùng estimator phổ thông với tái hiện thuật toán cost-sensitive chuyên biệt trong N02.
+
+M05. Đánh giá: [scikit-learn Cross-validation](https://scikit-learn.org/stable/modules/cross_validation.html).
+Hướng dẫn holdout, train/test, CV, cách chia theo nhóm và thời gian. Đây là nguồn thực hành phổ thông cho tầng 2; dùng biến thể phù hợp đơn vị dữ liệu của core, không sao chép tỷ lệ split bất chấp tương quan.
+
+M06. Nền tảng xuyên suốt: sách R31, cùng tài liệu thuật toán M01–M05. IEEE ComSoc Best Readings ở N03 cung cấp điểm vào do chuyên gia tuyển chọn cho lĩnh vực truyền thông. Bộ nguồn này phù hợp tiêu chí phổ thông và dễ tra cứu của người dùng; không biến thành chứng nhận rằng mọi thiết kế phía dưới chắc chắn đúng.
+
+6. NHỮNG ĐÍNH CHÍNH QUAN TRỌNG ĐỐI VỚI CÁCH DIỄN GIẢI .MD
+
+Các mục R03–R06, R12–R13, R20–R21, R28–R31 chỉ ra từng nhầm lẫn nguồn, biến thể thuật toán hoặc phạm vi kết luận. Chúng cần được hiểu là lỗi sử dụng bằng chứng; không phải lý do kết luận ML nhẹ không đáng tin.
+
+Ba kiểu suy luận cần bỏ khi xây luận văn:
+
+(1) “Bài uy tín dùng một model, nên giao tiếp và tham số của project đã được xác nhận.” Bài chỉ hỗ trợ những thiết kế và điều kiện thực sự được mô tả. Mở rộng sang tập action gồm modulation, coding và decoder iterations là lựa chọn nghiên cứu của project.
+
+(2) “Có train/test hoặc CV, nên nhãn đã là chân lý tối ưu.” Chia dữ liệu không xác nhận nghĩa của biến đích. Nhãn modulation đã phát, nhãn theo bảng ngưỡng, nhãn maximizing throughput và nhãn theo ràng buộc BER là các bài toán khác nhau. Monte Carlo hữu hạn cho ước lượng; không loại bỏ triệt để mọi bất định và không tự tạo oracle tối ưu tuyệt đối.
+
+(3) “Các test đã pass, nên mọi kết quả kém sau đó chỉ có thể do model.” Test xác nhận phạm vi đã kiểm tra; không chứng minh tuyệt đối không còn bug. Ngược lại, chất lượng thấp hoặc nhãn biến động cũng không tự là bằng chứng thiết kế vi phạm. Muốn kết luận vi phạm phải chỉ ra điều kiện, phép tính hoặc quy trình cụ thể bị phá vỡ.
+
+Sơ đồ “3 tầng” trong .md hiện tại còn là PHY gate → classifier → benchmark, khác ba tầng người dùng đã chốt là phương pháp luận → phương pháp và đánh giá → thiết kế giao tiếp ML–AMC. Không dùng sơ đồ cũ để diễn giải lại yêu cầu của người dùng.
+
+Không có căn cứ trong nhóm nguồn đã đối chiếu để tuyên bố toàn bộ lĩnh vực hội tụ về một cây đơn, gắn lợi ích tiết kiệm năng lượng với classifier khi chưa đo, hoặc khẳng định bộ lọc/DEFER làm hệ thống đúng một cách tự động.
+
+7. QUYẾT ĐỊNH SAU RÀ SOÁT VÀ GIỚI HẠN
+
+Đề xuất chốt tầng 2: supervised learning với DT/CART là ứng viên chính; RF classifier và kNN classifier là đối chứng cùng bài toán; holdout độc lập và CV theo đơn vị dữ liệu phù hợp là phương pháp đánh giá. Fixed và LUT/ngưỡng vẫn là đối chứng cần thiết để biết việc dùng ML đem lại gì. RF regressor hiện hữu là hướng predict-then-optimize có thể giữ để trả lời câu hỏi so sánh policy riêng.
+
+Chưa chốt giá trị depth, k, số cây hoặc feature mới chỉ từ literature. Các giá trị đó thuộc tầng thiết kế và cần lý do cấu hình cơ bản, cố định trước đánh giá. Không cần đòi kết quả tốt mới cho phép giữ lựa chọn.
+
+Những gì rà soát này không xác nhận: model nào thắng trên core; BER mục tiêu có đạt; runtime thực tế; tính đúng đắn của mọi nhãn hoặc mọi khối PHY. Đó là các kết luận phải đến từ kiểm tra và thực nghiệm đúng phạm vi sau khi thiết kế được chốt. Lựa chọn mô hình ở đây không phụ thuộc vào việc làm đẹp kết quả hiện tại.
+
+Giới hạn truy cập quan trọng: R10, R17, R23, R28, R29, N03 và N04 chỉ được đối chiếu một phần; một số sách chỉ ở phạm vi chương/mục lục hoặc metadata. R05, R20 và N07 được xem là preprint, không dựa vào danh tiếng tác giả để nâng mức bằng chứng. Chưa có công trình nào trong nhóm đã đọc xác nhận nguyên xi giao tiếp và toàn bộ tập action của project. Không tuyên bố đã đọc toàn văn mọi tài liệu hoặc “vét cạn” internet.

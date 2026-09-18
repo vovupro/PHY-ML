@@ -1,0 +1,3 @@
+"""
+research_core package
+"""

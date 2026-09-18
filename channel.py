@@ -19,7 +19,7 @@ from functools import lru_cache
 from typing import Optional
 import numpy as np
 import torch
-from sionna.phy.channel import RayleighBlockFading
+from sionna.phy.channel import GenerateFlatFadingChannel
 from sionna.phy.utils import complex_normal, db_to_lin
 
 
@@ -58,11 +58,9 @@ class ChannelOutput:
 
 
 @lru_cache(maxsize=1)
-def _get_rbf_model() -> RayleighBlockFading:
-    """Instantiate and cache canonical Sionna RayleighBlockFading model."""
-    return RayleighBlockFading(
-        num_rx=1, num_rx_ant=1, num_tx=1, num_tx_ant=1, precision="double"
-    )
+def _get_flat_fading_model() -> GenerateFlatFadingChannel:
+    """Instantiate and cache canonical Sionna GenerateFlatFadingChannel model."""
+    return GenerateFlatFadingChannel(num_tx_ant=1, num_rx_ant=1, precision="double")
 
 
 def generate_channel_coefficient(
@@ -99,13 +97,13 @@ def generate_channel_coefficient(
                 complex(h_magnitude * np.cos(theta), h_magnitude * np.sin(theta)),
                 dtype=torch.complex128,
             )
-        # Canonical Sionna RayleighBlockFading primitive
-        rbf = _get_rbf_model()
+        # Canonical Sionna GenerateFlatFadingChannel primitive
+        gfc = _get_flat_fading_model()
         if generator is not None:
             seed = torch.randint(0, 2**31 - 1, (1,), generator=generator).item()
-            rbf.torch_rng.manual_seed(seed)
-        a, _ = rbf(batch_size=1, num_time_steps=1)
-        return a.squeeze().to(torch.complex128)
+            gfc.torch_rng.manual_seed(seed)
+        h = gfc(batch_size=1).squeeze()
+        return h.to(torch.complex128)
 
     raise ValueError(f"Unsupported channel_type: {channel_type}. Supported: 'rayleigh', 'awgn'")
 

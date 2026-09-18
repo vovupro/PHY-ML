@@ -37,7 +37,7 @@ The project separates **experimental control** from **canonical PHY primitives**
 
 ## 📌 Current Stage
 
-**Verified Uncoded PHY Research Core** (Clean baseline prior to L1 Monte Carlo calibration and ML link adaptation).
+**L1 Verified PHY Core** (Clean baseline ready for **L2 1D Monte Carlo Calibration**).
 
 ---
 
@@ -55,20 +55,19 @@ The project separates **experimental control** from **canonical PHY primitives**
   - Canonical 2D Gray mapping: adjacent nearest-neighbour constellation points differ by exactly 1 bit.
 - **Physical Channel Models**:
   - **AWGN**: Additive white Gaussian noise channel with unit gain ($h = 1.0 + 0.0j$).
-  - **Slow Rayleigh Block Fading**: One complex scalar channel coefficient $h \sim \mathcal{CN}(0, 1)$ with $\mathbb{E}[|h|^2] = 1.0$, held strictly **constant across the entire transmission block** ($y = h \cdot x + n$). Independent realizations drawn between independent blocks.
+  - **Slow Rayleigh Block Fading**: One complex scalar channel coefficient generated via Sionna's `GenerateFlatFadingChannel(num_tx_ant=1, num_rx_ant=1, precision='double')` with $\mathbb{E}[|h|^2] = 1.0$, held strictly **constant across the entire transmission block** ($y = h \cdot x + n$). Independent realizations drawn between independent blocks.
   - Future-proofed 2D conditioning interface ($h\_magnitude$ parameter) for subsequent fading envelope sweeps.
 - **Receiver Architecture**:
   - Perfect coherent channel state information (CSI) baseline.
-  - True channel equalization: $\hat{x} = y / h$.
-  - Hard coherent maximum likelihood (ML) demapping via Sionna `Demapper('app', hard_out=True)` with effective noise variance $N_{0, \text{eff}} = N_0 / |h|^2$.
+  - Sionna hard APP demapping: true channel equalization $\hat{x} = y / h$ followed by Sionna `Demapper('app', hard_out=True)` with effective noise variance $N_{0, \text{eff}} = N_0 / |h|^2$.
 - **SNR Convention**:
   - Explicitly defined as nominal/setup $E_s / N_0$ in dB ($snr\_db$).
-  - With unit average constellation energy $E_s = 1.0$, the complex noise variance is $N_0 = 10^{-snr\_db / 10}$.
+  - With unit average constellation energy $E_s = 1.0$, the complex noise variance is $N_0 = 1 / \text{db\_to\_lin}(snr\_db)$.
 - **RNG Handling & Paired Evaluations**:
-  - Fully deterministic and reproducible using explicit NumPy `SeedSequence` and child `Generator` streams (`bit_rng`, `fading_rng`, `noise_rng`).
+  - Fully deterministic and reproducible using explicit Torch `Generator` streams (`bit_rng`, `fading_rng`, `noise_rng`).
   - Paired physical evaluations across candidate modulation modes share identical $h$ and noise realizations, strictly invariant to evaluation order.
 - **Raw PHY Metrics**:
-  - Transparent error counters: bit error count, total bits, BER, block error count, total blocks, BLER, nominal throughput/goodput.
+  - Transparent error counters: bit error count, total bits, BER, block error count, total blocks, BLER, bits_per_symbol.
 - **Physics Acceptance Suite**:
   - 15 automated tests validating Sionna Mapper $\to$ Demapper roundtrip, constellation energy, Gray consistency, noiseless round-trip, coherent demodulation, exact analytical AWGN BER ($Q$-function/erfc and exact PAM/2D decision-region integration), analytical Rayleigh average BER, $h$ constancy, independence, and deterministic reproducibility.
 

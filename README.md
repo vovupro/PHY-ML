@@ -37,7 +37,9 @@ The project separates **experimental control** from **canonical PHY primitives**
 
 ## 📌 Current Stage
 
-**L1 Verified PHY Core** (Clean baseline ready for **L2 1D Monte Carlo Calibration**).
+**L3 Ground Truth & Baseline Policies Completed**
+Workflow:
+`L1 Verified PHY Core` $\to$ `L2 1D Monte Carlo Calibration (5,000 blocks / point)` $\to$ `L3 Ground Truth (BestMode) & Baselines (Fixed Robust, Fixed High-Throughput, 1D LUT)`.
 
 ---
 
@@ -157,7 +159,19 @@ test_14_modulation_order_invariance_for_paired_eval ... ok
 - `PHYEngine(block_symbols: int)`: Core evaluation engine (`evaluate_mode`, `evaluate_paired_block`)
 
 ### `metrics.py`
-- `RawPHYCounters`: Stateful accumulator for bits, blocks, BER, and BLER
-- `compute_ber(bit_errors, total_bits) -> float`
-- `compute_bler(block_errors, total_blocks) -> float`
-- `compute_raw_goodput(bler, bits_per_symbol) -> float`
+- `RawPHYCounters`: Stateful accumulator for bits, blocks, BER, BLER, mean block BER, and block standard error ($SE$).
+- `count_errors`, `count_block_errors`, `compute_ber`, `compute_bler`: Sionna 2.0 canonical functions.
+
+### `calibration_1d.py` (L2)
+- `Calibration1DConfig`: Configuration parameters (SNR grid, num_blocks=5000, batch_blocks=500, symbols_per_block=1536, master_seed).
+- `run_1d_calibration(config) -> List[CalibrationRecord]`: Vectorized chunk-batching Monte Carlo calibration preserving paired realizations.
+- `save_calibration_csv(records, output_path)`: Exports raw counts, block variance, and SE to CSV.
+- `generate_verification_report(records, config, records_seed_b, ...) -> str`: Rigorous telecom report comparing empirical curves against independent SciPy analytical theory using block standard errors.
+
+### `ground_truth.py` (L3)
+- `GroundTruthConfig`: Explicit parameters (`ber_target=0.01`, `fallback_policy="robustest_mode"`, `confidence_k=1.96`).
+- `compute_ground_truth(calibration_data, config) -> List[GroundTruthRow]`: Synthesizes BestMode strictly from calibration tables without re-running PHY.
+- `FixedRobustPolicy`: Baseline unconditionally selecting BPSK (1 bpcu).
+- `FixedHighThroughputPolicy`: Baseline unconditionally selecting 64-QAM (6 bpcu).
+- `LookupTable1D`: Derived 1D LUT with thresholds at ground-truth mode transition midpoints.
+- `generate_l3_report(rows, lut, config, ...) -> str`: Generates telecom verification report documenting switching regions, thresholds, boundary ambiguity, and fallback events.

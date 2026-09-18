@@ -27,6 +27,8 @@ class RawPHYCounters:
     block_errors: int = 0
     total_blocks: int = 0
     bits_per_symbol: int = 0
+    sum_block_ber: float = 0.0
+    sum_sq_block_ber: float = 0.0
 
     def update(
         self,
@@ -34,6 +36,8 @@ class RawPHYCounters:
         total_bits: int,
         block_error: int = 0,
         blocks: int = 1,
+        sum_ber: float = 0.0,
+        sum_sq_ber: float = 0.0,
     ) -> None:
         """Increment counters with observations from one or more blocks."""
         b_err = int(bit_errors)
@@ -50,16 +54,42 @@ class RawPHYCounters:
         self.total_bits += tot_b
         self.block_errors += blk_err
         self.total_blocks += blks
+        self.sum_block_ber += float(sum_ber)
+        self.sum_sq_block_ber += float(sum_sq_ber)
 
     @property
     def ber(self) -> float:
-        """Bit Error Rate."""
+        """Macro Bit Error Rate (total bit errors / total bits)."""
         return float(self.bit_errors / self.total_bits) if self.total_bits > 0 else 0.0
 
     @property
     def bler(self) -> float:
         """Block Error Rate."""
         return float(self.block_errors / self.total_blocks) if self.total_blocks > 0 else 0.0
+
+    @property
+    def mean_block_ber(self) -> float:
+        """Mean of per-block BER across independent fading blocks."""
+        return float(self.sum_block_ber / self.total_blocks) if self.total_blocks > 0 else 0.0
+
+    @property
+    def var_block_ber(self) -> float:
+        """Sample variance of per-block BER across independent fading blocks."""
+        if self.total_blocks <= 1:
+            return 0.0
+        n = self.total_blocks
+        val = (self.sum_sq_block_ber - (self.sum_block_ber ** 2) / n) / (n - 1)
+        return float(max(0.0, val))
+
+    @property
+    def std_block_ber(self) -> float:
+        """Sample standard deviation of per-block BER across independent fading blocks."""
+        return float(self.var_block_ber ** 0.5)
+
+    @property
+    def se_block_ber(self) -> float:
+        """Standard error of the mean block BER across independent fading blocks."""
+        return float(self.std_block_ber / (self.total_blocks ** 0.5)) if self.total_blocks > 0 else 0.0
 
     def summary(self) -> Dict[str, Any]:
         """Return a plain dictionary summary of raw counters and calculated rates."""
@@ -71,6 +101,9 @@ class RawPHYCounters:
             "total_blocks": int(self.total_blocks),
             "bler": self.bler,
             "bits_per_symbol": int(self.bits_per_symbol),
+            "mean_block_ber": self.mean_block_ber,
+            "std_block_ber": self.std_block_ber,
+            "se_block_ber": self.se_block_ber,
         }
 
 

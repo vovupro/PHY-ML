@@ -1,4 +1,4 @@
-"""PHY-ML: Minimal Verified Uncoded Physical Layer (PHY) Core."""
+"""PHY-ML: Minimal Verified Uncoded Physical Layer (PHY) Core powered by Sionna 2.0."""
 
 from channel import (
     BlockRNG,
@@ -21,10 +21,11 @@ from phy_engine import (
     PHYEngine,
 )
 from metrics import (
-    RawPHYCounters,
+    count_errors,
+    count_block_errors,
     compute_ber,
     compute_bler,
-    compute_raw_goodput,
+    RawPHYCounters,
 )
 
 __all__ = [
@@ -44,8 +45,9 @@ __all__ = [
     "modulate",
     "demodulate",
     "PHYEngine",
-    "RawPHYCounters",
+    "count_errors",
+    "count_block_errors",
     "compute_ber",
     "compute_bler",
-    "compute_raw_goodput",
+    "RawPHYCounters",
 ]

@@ -10,6 +10,7 @@ from channel import (
 )
 from phy_engine import (
     ModulationMode,
+    Mode,
     BlockEvaluationResult,
     MODES,
     MODE_BY_ID,
@@ -34,6 +35,7 @@ __all__ = [
     "generate_standard_noise",
     "apply_channel",
     "ModulationMode",
+    "Mode",
     "BlockEvaluationResult",
     "MODES",
     "MODE_BY_ID",

@@ -1,12 +1,13 @@
-"""PHY Acceptance Gate: Pure Physical Layer Verification Suite.
+"""PHY Acceptance Gate: Pure Physical Layer Verification Suite with Sionna 2.0 Backend.
 
-Tests validate mathematical anchors, physics, and reproducibility:
-    1. Unit-average constellation energy (Es = 1).
+Tests validate:
+    0. Sionna Mapper -> Demapper noiseless roundtrip across all 4 candidate modulations.
+    1. Unit-average constellation energy (Es = 1.0).
     2. Expected constellation sizes for BPSK, QPSK, 16-QAM, 64-QAM.
-    3. Gray nearest-neighbour consistency for all constellations.
-    4. Noiseless modulate/demodulate round trip.
-    5. Hard coherent demodulation correctness with known complex h.
-    6. AWGN BER sanity against analytical expressions (erfc / exact PAM region integration).
+    3. Gray nearest-neighbour consistency for all Sionna constellations.
+    4. Noiseless modulate/demodulate round trip through the PHY engine.
+    5. Hard coherent demodulation correctness with known complex h (equalization).
+    6. AWGN BER sanity against analytical expressions (erfc / exact 2D region integration).
     7. Rayleigh average BER sanity against analytical expectation.
     8. Approximately E[|h|^2] = 1 for Rayleigh fading.
     9. Channel coefficient h is strictly constant across the entire block.
@@ -18,6 +19,7 @@ Tests validate mathematical anchors, physics, and reproducibility:
 """
 import unittest
 import numpy as np
+import torch
 from scipy.special import erfc, ndtr
 
 from channel import (
@@ -30,9 +32,11 @@ from channel import (
 )
 from phy_engine import (
     ModulationMode,
+    Mode,
     BlockEvaluationResult,
     MODES,
     MODE_BY_ID,
+    _get_sionna_modem,
     constellation,
     modulate,
     demodulate,
@@ -43,8 +47,23 @@ from metrics import RawPHYCounters, compute_ber, compute_bler, compute_raw_goodp
 
 class TestPhysics(unittest.TestCase):
 
+    def test_00_sionna_mapper_demapper_noiseless_roundtrip(self):
+        """0. Direct verification of Sionna 2.0 Mapper -> Demapper noiseless roundtrip."""
+        for m in (1, 2, 4, 6):
+            const, mapper, demapper = _get_sionna_modem(m)
+            num_bits = 600 * m
+            bits = torch.randint(0, 2, (num_bits,), dtype=torch.float64)
+            symbols = mapper(bits)
+            # Hard demapping with minimal noise variance
+            no_tensor = torch.tensor(1e-4, dtype=torch.float64)
+            demapped_bits = demapper(symbols, no_tensor)
+            self.assertTrue(
+                torch.equal(bits, demapped_bits),
+                msg=f"Sionna direct roundtrip failed for m={m} bits/symbol"
+            )
+
     def test_01_unit_average_constellation_energy(self):
-        """1. Constellations must have exact unit average symbol energy (Es = 1.0)."""
+        """1. Sionna constellations must have exact unit average symbol energy (Es = 1.0)."""
         for m in (1, 2, 4, 6):
             points, _ = constellation(m)
             avg_energy = float(np.mean(np.abs(points) ** 2))
@@ -60,7 +79,6 @@ class TestPhysics(unittest.TestCase):
             points, labels = constellation(m)
             self.assertEqual(len(points), exp_size)
             self.assertEqual(labels.shape, (exp_size, m))
-            # Unique constellation points
             self.assertEqual(len(np.unique(points)), exp_size)
 
     def test_03_gray_nearest_neighbour_consistency(self):
@@ -70,7 +88,6 @@ class TestPhysics(unittest.TestCase):
             dists = np.abs(points[:, None] - points[None, :])
             min_dist = float(np.min(dists[dists > 1e-6]))
 
-            # Find all nearest-neighbour pairs
             nn_indices = np.argwhere(np.isclose(dists, min_dist))
             self.assertGreater(len(nn_indices), 0)
             for i, j in nn_indices:
@@ -81,14 +98,13 @@ class TestPhysics(unittest.TestCase):
                 )
 
     def test_04_noiseless_round_trip(self):
-        """4. Transmitting through a noiseless channel with h=1 must recover 100% of bits."""
+        """4. Transmitting through noiseless channel with h=1 must recover 100% of bits."""
         rng = np.random.default_rng(20260901)
         for m in (1, 2, 4, 6):
             num_symbols = 500
             bits = rng.integers(0, 2, num_symbols * m, dtype=np.int32)
             symbols = modulate(bits, m)
-            # Demodulate directly with known h = 1.0
-            recovered = demodulate(symbols, h=1.0 + 0.0j, bits_per_symbol=m)
+            recovered = demodulate(symbols, h=1.0 + 0.0j, bits_per_symbol=m, n0=1e-4)
             np.testing.assert_array_equal(recovered, bits)
 
     def test_05_coherent_demodulation_with_known_complex_h(self):
@@ -99,23 +115,22 @@ class TestPhysics(unittest.TestCase):
             -0.7 + 0.3j,
             0.1 - 0.9j,
             3.5 + 2.1j,
-            0.05 + 0.05j,  # Small magnitude
+            0.05 + 0.05j,
         ]
         for h_val in test_channels:
             for m in (1, 2, 4, 6):
                 bits = rng.integers(0, 2, 600 * m, dtype=np.int32)
                 symbols = modulate(bits, m)
-                received = h_val * symbols  # pure channel rotation and scaling
-                recovered = demodulate(received, h=h_val, bits_per_symbol=m)
+                received = h_val * symbols
+                recovered = demodulate(received, h=h_val, bits_per_symbol=m, n0=1e-4)
                 np.testing.assert_array_equal(
                     recovered, bits,
                     err_msg=f"Failed coherent demodulation for m={m} with h={h_val}"
                 )
 
     def test_06_awgn_ber_sanity_analytical(self):
-        """6. AWGN BER across all modulations must match exact analytical formulas."""
+        """6. AWGN BER with Sionna modem must match exact analytical formulas."""
         rng = np.random.default_rng(20260903)
-        # Test configurations: (m, snr_db, tolerance)
         test_cases = [
             (1, 0.0, 0.0035),   # BPSK
             (2, 4.0, 0.0035),   # QPSK
@@ -126,7 +141,6 @@ class TestPhysics(unittest.TestCase):
         for m, snr_db, tol in test_cases:
             n0 = 10.0 ** (-snr_db / 10.0)
             num_bits = 300_000
-            # Ensure divisibility
             num_bits = (num_bits // m) * m
             bits = rng.integers(0, 2, num_bits, dtype=np.int32)
 
@@ -139,29 +153,35 @@ class TestPhysics(unittest.TestCase):
                 standard_noise=std_noise,
             )
 
-            rx_bits = demodulate(rx_output.received_symbols, h=1.0 + 0.0j, bits_per_symbol=m)
+            rx_bits = demodulate(rx_output.received_symbols, h=1.0 + 0.0j, bits_per_symbol=m, n0=n0)
             sim_ber = float(np.mean(bits != rx_bits))
 
             # Exact analytical reference
             if m == 1:
-                # BPSK: Pb = 0.5 * erfc(sqrt(Es / N0)) = 0.5 * erfc(sqrt(1 / N0))
                 expected_ber = float(0.5 * erfc(np.sqrt(1.0 / n0)))
             elif m == 2:
-                # QPSK: Pb = 0.5 * erfc(sqrt(0.5 / N0))
                 expected_ber = float(0.5 * erfc(np.sqrt(0.5 / n0)))
             else:
-                # Exact integration over PAM decision regions for square QAM
-                width = m // 2
-                levels = constellation(m)[0][np.arange(2**width) * (2**width)].real
-                order = np.argsort(levels)
-                levels = levels[order]
-                pam_labels = ((order[:, None] >> np.arange(width - 1, -1, -1)) & 1)
-                bounds = np.r_[-np.inf, (levels[:-1] + levels[1:]) / 2.0, np.inf]
-                # Noise standard deviation per dimension: sigma = sqrt(N0 / 2)
-                sigma_1d = np.sqrt(n0 / 2.0)
-                prob = np.diff(ndtr((bounds[None, :] - levels[:, None]) / sigma_1d), axis=1)
-                hamming = np.count_nonzero(pam_labels[:, None, :] != pam_labels[None, :, :], axis=2)
-                expected_ber = float(np.sum(prob * hamming) / (len(levels) * width))
+                pts, labels = constellation(m)
+                sigma = np.sqrt(n0 / 2.0)
+                real_pts = np.sort(np.unique(pts.real))
+                imag_pts = np.sort(np.unique(pts.imag))
+                r_bounds = np.r_[-np.inf, (real_pts[:-1] + real_pts[1:]) / 2.0, np.inf]
+                i_bounds = np.r_[-np.inf, (imag_pts[:-1] + imag_pts[1:]) / 2.0, np.inf]
+
+                total_ber = 0.0
+                for k in range(len(pts)):
+                    pk = pts[k]
+                    p_r = ndtr((r_bounds[1:] - pk.real) / sigma) - ndtr((r_bounds[:-1] - pk.real) / sigma)
+                    p_i = ndtr((i_bounds[1:] - pk.imag) / sigma) - ndtr((i_bounds[:-1] - pk.imag) / sigma)
+                    prob_matrix = p_r[:, None] * p_i[None, :]
+                    cell_centers = real_pts[:, None] + 1j * imag_pts[None, :]
+                    dists = np.abs(cell_centers[:, :, None] - pts[None, None, :])
+                    cell_nearest_pt = np.argmin(dists, axis=2)
+                    hamming = np.count_nonzero(labels[cell_nearest_pt] != labels[k], axis=2)
+                    total_ber += float(np.sum(prob_matrix * hamming))
+
+                expected_ber = float(total_ber / (len(pts) * m))
 
             self.assertAlmostEqual(
                 sim_ber, expected_ber, delta=tol,
@@ -170,10 +190,9 @@ class TestPhysics(unittest.TestCase):
 
     def test_07_rayleigh_average_ber_analytical(self):
         """7. BPSK average BER over slow Rayleigh fading must match theoretical Pb = 0.5*(1 - sqrt(g/(1+g)))."""
-        # Nominal Es/N0 = 4 dB
         snr_db = 4.0
         n0 = 10.0 ** (-snr_db / 10.0)
-        avg_snr_linear = 1.0 / n0  # Es = 1, so gamma_bar = Es / N0
+        avg_snr_linear = 1.0 / n0
         expected_ber = float(0.5 * (1.0 - np.sqrt(avg_snr_linear / (1.0 + avg_snr_linear))))
 
         engine = PHYEngine(block_symbols=128)
@@ -197,7 +216,6 @@ class TestPhysics(unittest.TestCase):
             )
             counters.update(bit_errors=res.bit_errors, total_bits=res.total_bits, block_error=res.block_error)
 
-        # Statistical tolerance for Monte Carlo over 2000 fading blocks
         self.assertAlmostEqual(
             counters.ber, expected_ber, delta=0.012,
             msg=f"Rayleigh average BER {counters.ber:.4f} != theoretical {expected_ber:.4f}"
@@ -227,11 +245,9 @@ class TestPhysics(unittest.TestCase):
             noise_rng=rng,
         )
 
-        # Verify y = h * x + n
         noiseless_part = output.received_symbols - output.noise
         effective_h_per_symbol = noiseless_part / symbols
 
-        # Every symbol experienced the exact same scalar h
         np.testing.assert_allclose(
             effective_h_per_symbol, h_known, rtol=1e-12, atol=1e-12,
             err_msg="h varied across symbols within the block!"
@@ -248,7 +264,6 @@ class TestPhysics(unittest.TestCase):
             hs.append(h)
         hs = np.array(hs)
 
-        # Lag-1 correlation should be statistically zero
         lag1_corr = np.mean(hs[:-1] * np.conj(hs[1:]))
         self.assertLess(
             abs(lag1_corr), 0.05,
@@ -260,13 +275,11 @@ class TestPhysics(unittest.TestCase):
         master_seed = 20260908
         block_id = 42
 
-        # First run
         rng1 = make_block_rng(master_seed, block_id)
         h1 = generate_channel_coefficient(rng1.fading_rng)
         noise1 = generate_standard_noise(rng1.noise_rng, 500)
         bits1 = rng1.bit_rng.integers(0, 2, 500, dtype=np.int32)
 
-        # Second run with same parameters
         rng2 = make_block_rng(master_seed, block_id)
         h2 = generate_channel_coefficient(rng2.fading_rng)
         noise2 = generate_standard_noise(rng2.noise_rng, 500)
@@ -306,7 +319,6 @@ class TestPhysics(unittest.TestCase):
             res = engine.evaluate_mode(mode, snr_db, h, bits, noise)
             individual_results.append((res.bit_errors, res.block_error, res.ber))
 
-        # Re-run sequentially with fresh RNG matching same seeds
         reconstructed_results = []
         for b in range(10):
             rng = make_block_rng(master_seed, b)

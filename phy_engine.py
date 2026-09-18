@@ -1,16 +1,19 @@
-"""Minimal uncoded coherent physical layer (PHY) engine.
+"""Physical layer (PHY) engine wrapping Sionna 2.0 primitives.
 
-Supports:
-    - Modulations: BPSK (1 bit/sym), QPSK (2 bits/sym), 16-QAM (4 bits/sym), 64-QAM (6 bits/sym).
-    - Unit-average-energy normalization: E[|s|^2] = 1 for all constellations.
-    - True 2D Gray mapping with single-bit differences between adjacent constellation points.
-    - Hard coherent maximum likelihood (ML) demodulation with known complex channel coefficient h.
+Canonical PHY modem backend:
+    - Modulation: BPSK (1 bit/sym), QPSK (2 bits/sym), 16-QAM (4 bits/sym), 64-QAM (6 bits/sym).
+    - Constellation mapping & demapping are delegated entirely to Sionna 2.0 (PyTorch backend).
+    - Receiver architecture:
+          y  ->  divide/equalize by true h  ->  Sionna Demapper  ->  hard bits
+    - Coherent ML detection with perfect CSI baseline.
     - Paired physical evaluation across candidate modulation modes on identical channel and noise realizations.
 """
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Sequence
+from typing import Sequence, Tuple
 import numpy as np
+import torch
+from sionna.phy.mapping import Mapper, Demapper, Constellation
 
 from channel import apply_channel, ChannelOutput
 
@@ -27,7 +30,10 @@ class ModulationMode:
         return f"{self.modulation}-uncoded"
 
 
-# Catalogue of active uncoded PHY modes
+# Convenient alias requested by thesis architecture
+Mode = ModulationMode
+
+# Active canonical catalog: uncoded BPSK, QPSK, 16QAM, 64QAM
 MODES: tuple[ModulationMode, ...] = (
     ModulationMode(mode_id=0, modulation="BPSK", bits_per_symbol=1),
     ModulationMode(mode_id=1, modulation="QPSK", bits_per_symbol=2),
@@ -65,9 +71,26 @@ def validate_binary(bits: np.ndarray) -> np.ndarray:
     return b.astype(np.int32)
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=4)
+def _get_sionna_modem(bits_per_symbol: int) -> Tuple[Constellation, Mapper, Demapper]:
+    """Instantiate and cache canonical Sionna 2.0 Constellation, Mapper, and Demapper.
+
+    BPSK uses PAM (1 bit), QPSK/16QAM/64QAM use QAM (2, 4, 6 bits).
+    Precision is set to 'double' for 64-bit numerical stability.
+    """
+    m = bits_per_symbol
+    if m not in (1, 2, 4, 6):
+        raise ValueError(f"Supported bits_per_symbol: 1, 2, 4, 6. Got {m}")
+
+    constellation_type = "pam" if m == 1 else "qam"
+    const = Constellation(constellation_type, m, precision="double")
+    mapper = Mapper(constellation=const, precision="double")
+    demapper = Demapper("app", constellation=const, hard_out=True, precision="double")
+    return const, mapper, demapper
+
+
 def constellation(bits_per_symbol: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return unit-energy constellation points and bit labels with Gray mapping.
+    """Retrieve unit-energy constellation points and bit labels from Sionna 2.0.
 
     Parameters
     ----------
@@ -77,43 +100,21 @@ def constellation(bits_per_symbol: int) -> tuple[np.ndarray, np.ndarray]:
     Returns
     -------
     points : np.ndarray
-        Complex128 array of length 2^m with E[|points|^2] = 1.0.
+        Complex128 array of length 2^m.
     labels : np.ndarray
-        Int32 array of shape (2^m, m) containing the binary label for each point.
+        Int32 array of shape (2^m, m) matching Sionna's bit indexing.
     """
+    const, _, _ = _get_sionna_modem(bits_per_symbol)
     m = bits_per_symbol
-    if m not in (1, 2, 4, 6):
-        raise ValueError(f"Supported bits_per_symbol: 1 (BPSK), 2 (QPSK), 4 (16QAM), 6 (64QAM). Got {m}")
-
+    points = const.points.detach().cpu().numpy().astype(np.complex128)
     labels = ((np.arange(2**m)[:, None] >> np.arange(m - 1, -1, -1)) & 1).astype(np.int32)
-
-    if m == 1:
-        # BPSK: bit 0 -> +1, bit 1 -> -1
-        points = (1.0 - 2.0 * labels[:, 0]).astype(np.complex128)
-    elif m == 2:
-        # QPSK: Gray mapped across I and Q
-        points = ((1.0 - 2.0 * labels[:, 0]) + 1j * (1.0 - 2.0 * labels[:, 1])) / np.sqrt(2.0)
-    elif m == 4:
-        # 16-QAM: PAM-4 Gray levels [-3, -1, 3, 1] for 2 bits each
-        levels = np.array([-3.0, -1.0, 3.0, 1.0])
-        i_comp = levels[labels[:, 0] * 2 + labels[:, 1]]
-        q_comp = levels[labels[:, 2] * 2 + labels[:, 3]]
-        points = (i_comp + 1j * q_comp) / np.sqrt(10.0)
-    else:
-        # 64-QAM: PAM-8 Gray levels for 3 bits each
-        levels_8 = np.array([-7.0, -5.0, -1.0, -3.0, 7.0, 5.0, 1.0, 3.0])
-        i_idx = labels[:, 0] * 4 + labels[:, 1] * 2 + labels[:, 2]
-        q_idx = labels[:, 3] * 4 + labels[:, 4] * 2 + labels[:, 5]
-        points = (levels_8[i_idx] + 1j * levels_8[q_idx]) / np.sqrt(42.0)
-
-    points = np.asarray(points, dtype=np.complex128)
     points.setflags(write=False)
     labels.setflags(write=False)
     return points, labels
 
 
 def modulate(bits: np.ndarray, bits_per_symbol: int) -> np.ndarray:
-    """Map binary bits to unit-energy complex modulation symbols.
+    """Map binary bits to unit-energy complex modulation symbols using Sionna 2.0 Mapper.
 
     Parameters
     ----------
@@ -132,9 +133,10 @@ def modulate(bits: np.ndarray, bits_per_symbol: int) -> np.ndarray:
     if len(b) % m != 0:
         raise ValueError(f"Bit length {len(b)} must divide evenly into symbols of size {m}")
 
-    points, _ = constellation(m)
-    indices = b.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))
-    symbols = points[indices]
+    _, mapper, _ = _get_sionna_modem(m)
+    bits_tensor = torch.from_numpy(b.astype(np.float64))
+    symbols_tensor = mapper(bits_tensor)
+    symbols = symbols_tensor.detach().cpu().numpy().astype(np.complex128)
     symbols.setflags(write=False)
     return symbols
 
@@ -143,11 +145,12 @@ def demodulate(
     received_symbols: np.ndarray,
     h: complex,
     bits_per_symbol: int,
+    n0: float = 1.0,
 ) -> np.ndarray:
-    """Hard coherent maximum likelihood demodulation with known channel coefficient h.
+    """Coherent demodulation using true channel equalization and Sionna 2.0 Demapper.
 
-    Metric: argmin_{s in C} |y - h * s|^2.
-    Vectorized and unconditionally stable for any complex h.
+    Architecture:
+        y  ->  divide/equalize by true h (y_eq = y / h)  ->  Sionna Demapper(y_eq, N0_eff)  ->  hard bits
 
     Parameters
     ----------
@@ -157,6 +160,8 @@ def demodulate(
         Scalar complex channel coefficient known to the coherent receiver.
     bits_per_symbol : int
         Modulation order (1, 2, 4, or 6).
+    n0 : float, default 1.0
+        Channel noise variance N0 = 10^(-snr_db / 10).
 
     Returns
     -------
@@ -170,20 +175,34 @@ def demodulate(
         raise ValueError("received_symbols contains non-finite values")
 
     m = bits_per_symbol
-    points, labels = constellation(m)
+    _, _, demapper = _get_sionna_modem(m)
 
-    # Coherent ML distance: |y - h * s|^2
-    diff = y[:, None] - (h * points[None, :])
-    dist_sq = np.real(diff * np.conj(diff))
-    best_idx = np.argmin(dist_sq, axis=1)
+    h_scalar = complex(h)
+    abs_h_sq = abs(h_scalar) ** 2
 
-    detected = labels[best_idx].reshape(-1)
+    # Zero gain edge-case: cannot equalize, return default zeros
+    if abs_h_sq < 1e-15:
+        detected = np.zeros(len(y) * m, dtype=np.int32)
+        detected.setflags(write=False)
+        return detected
+
+    # Coherent equalization by true scalar h: y_eq = y / h
+    y_eq = y / h_scalar
+
+    # Effective noise variance after equalization: N0_eff = N0 / |h|^2
+    no_eff_val = max(float(n0) / abs_h_sq, 1e-12)
+
+    y_eq_t = torch.as_tensor(y_eq, dtype=torch.complex128)
+    no_eff_t = torch.tensor(no_eff_val, dtype=torch.float64)
+
+    detected_t = demapper(y_eq_t, no_eff_t)
+    detected = detected_t.detach().cpu().numpy().astype(np.int32)
     detected.setflags(write=False)
     return detected
 
 
 class PHYEngine:
-    """Core Physical Layer Engine for single-carrier block transmissions."""
+    """Core Physical Layer Engine wrapping Sionna 2.0 for single-carrier block transmissions."""
 
     def __init__(self, block_symbols: int = 1536):
         if not isinstance(block_symbols, int) or block_symbols <= 0:
@@ -232,7 +251,12 @@ class PHYEngine:
             standard_noise=standard_noise,
         )
 
-        rx_bits = demodulate(ch_out.received_symbols, h=h, bits_per_symbol=mode.bits_per_symbol)
+        rx_bits = demodulate(
+            ch_out.received_symbols,
+            h=h,
+            bits_per_symbol=mode.bits_per_symbol,
+            n0=ch_out.noise_variance,
+        )
         bit_errors = int(np.count_nonzero(tx_bits != rx_bits))
         block_error = 1 if bit_errors > 0 else 0
         ber = float(bit_errors / req_bits)

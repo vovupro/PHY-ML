@@ -1,4 +1,4 @@
-﻿# Python bytecode & cache
+# Python bytecode & cache
 __pycache__/
 *.py[cod]
 *$py.class
@@ -23,7 +23,9 @@ ENV/
 # OS generated files
 .DS_Store
 Thumbs.db
-archive/
-results/
-*.log
 desktop.ini
+
+# Output, log, and transient experiment artifacts
+results/
+archive/
+*.log

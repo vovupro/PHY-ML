@@ -1,42 +1,71 @@
-# PHY-ML: Joint Modulation, Coding & Decoder Effort Adaptation (PHY-AMC)
+# PHY-ML: Minimal Verified Uncoded PHY Research Core
 
-> **Lightweight Machine Learning for Joint Link Adaptation & Decoder Resource Optimization on Fading Wireless Channels**
-
----
-
-## 📌 Overview
-
-This repository contains the numerical research core (`research_core`) implementing **PHY-AMC**: an end-to-end framework for joint adaptation of:
-1. **Modulation Scheme**: BPSK, QPSK, 16-QAM, 64-QAM, 256-QAM.
-2. **Channel Coding**: Uncoded transmission or LDPC (5G NR compliant code rates $R \in \{1/2, 2/3, 3/4, 5/6\}$ via Sionna/PyTorch).
-3. **Decoder Effort Allocation**: Adaptive Belief Propagation (BP) iteration capping ($I_{\max} \in \{5, 10\}$) to optimize decoding energy and latency budget.
-
-Adaptation is driven by interpretable, low-latency **Lightweight Machine Learning** models (CART Decision Trees, Random Forests) operating on pilot-based SNR/CSI estimates under real-time constraints ($\mu$s-scale inference latency).
+A transparent, reproducible, and mathematically verified physical layer (PHY) foundation for wireless communication and link adaptation studies.
 
 ---
 
-## 🏗️ Architecture & Philosophy
+## 📌 Current Stage
 
-The project follows a **3-Tier Architecture** adhering to rigorous empirical evaluation protocols:
+**Verified Uncoded PHY Research Core** (Clean baseline prior to L1 Monte Carlo calibration and ML link adaptation).
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ Tier 1: Soundness Verification Gate (Physics & Anchor Checks)               │
-│ - AWGN erfc analytical SER/BER                                              │
-│ - Rayleigh fading integration bounds                                        │
-│ - Cramér-Rao lower bound on pilot-based channel estimation                  │
-│ - Disjoint seed & partition integrity                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Tier 2: Physical Layer Engine (Sionna / NumPy PHY Link)                      │
-│ - Single-carrier link with block fading channels                            │
-│ - Configurable pilots, symbols, SNR range, and coherence times              │
-│ - Uncoded & LDPC 5G NR code rates with BP decoders                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ Tier 3: Adaptive Policy & ML Decision Engine                                │
-│ - Baselines: Fixed Modulation, Lookup Table (LUT), Empirical Oracle        │
-│ - Lightweight ML: Decision Tree (DT) & Random Forest (RF)                   │
-│ - Strict pre-registration: Disjoint train/validation/test sets, no leakage │
-└─────────────────────────────────────────────────────────────────────────────┘
+---
+
+## ✅ Implemented Features
+
+- **Modulation Schemes**:
+  - BPSK ($1\text{ bit/symbol}$)
+  - QPSK ($2\text{ bits/symbol}$)
+  - 16-QAM ($4\text{ bits/symbol}$)
+  - 64-QAM ($6\text{ bits/symbol}$)
+- **Constellation Properties**:
+  - Exact unit average symbol energy normalization: $\mathbb{E}[|s|^2] = 1.0$.
+  - Exact 2D Gray mapping: adjacent nearest-neighbour constellation points differ by exactly 1 bit.
+- **Physical Channel Models**:
+  - **AWGN**: Additive white Gaussian noise channel with unit gain ($h = 1.0 + 0.0j$).
+  - **Slow Rayleigh Block Fading**: One complex scalar channel coefficient $h \sim \mathcal{CN}(0, 1)$ with $\mathbb{E}[|h|^2] = 1.0$, held strictly **constant across the entire transmission block** ($y = h \cdot x + n$). Independent realizations drawn between independent blocks.
+  - Future-proofed 2D conditioning interface ($h\_magnitude$ parameter) for subsequent fading envelope sweeps.
+- **Receiver Architecture**:
+  - Perfect coherent channel state information (CSI) baseline.
+  - Unconditionally stable coherent maximum likelihood (ML) hard demodulation: $\arg\min_{s \in \mathcal{C}} |y - h \cdot s|^2$.
+- **SNR Convention**:
+  - Explicitly defined as nominal/setup $E_s / N_0$ in dB ($snr\_db$).
+  - With unit average constellation energy $E_s = 1.0$, the complex noise variance is $N_0 = 10^{-snr\_db / 10}$.
+- **RNG Handling & Paired Evaluations**:
+  - Fully deterministic and reproducible using explicit NumPy `SeedSequence` and child `Generator` streams (`bit_rng`, `fading_rng`, `noise_rng`).
+  - Paired physical evaluations across candidate modulation modes share identical $h$ and noise realizations, strictly invariant to evaluation order.
+- **Raw PHY Metrics**:
+  - Transparent error counters: bit error count, total bits, BER, block error count, total blocks, BLER, nominal throughput/goodput.
+- **Physics Acceptance Suite**:
+  - 14 automated tests validating constellation energy, Gray consistency, noiseless round-trip, coherent demodulation, exact analytical AWGN BER ($Q$-function/erfc and exact PAM decision-region integration), analytical Rayleigh average BER, $h$ constancy, independence, and deterministic reproducibility.
+
+---
+
+## 🚫 Explicitly Not Implemented Yet (Deferred to Later Levels)
+
+This minimal core deliberately excludes:
+- AMC policy selection & Monte Carlo calibration
+- Lookup Table (LUT) baselines
+- Decision Tree (CART) & Random Forest classifiers
+- 2D feature study ($|h|$ vs $E_s/N_0$)
+- Pilot transmission & practical channel/SNR estimation
+- Channel coding (LDPC, Polar, Convolutional, Turbo)
+- CRC verification, ACK/NACK feedback, and HARQ protocols
+- FPGA export and fixed-point quantization
+
+---
+
+## 📂 Active Repository Structure
+
+```text
+PHY-ML/
+├── .gitignore          # Clean Git ignore definitions
+├── README.md           # Project overview and scope
+├── __init__.py         # Package root exposing public PHY API
+├── requirements.txt    # Minimal scientific Python dependencies
+├── channel.py          # Slow Rayleigh block fading and AWGN channel model
+├── phy_engine.py       # Constellations, modulation, and coherent demodulation
+├── metrics.py          # Raw PHY counters and error rate calculations
+└── test_physics.py     # 14-point physical layer acceptance test gate
 ```
 
 ---
@@ -45,76 +74,55 @@ The project follows a **3-Tier Architecture** adhering to rigorous empirical eva
 
 ### 1. Installation
 
-Clone the repository:
-```bash
-git clone https://github.com/vovupro/PHY-ML.git
-cd PHY-ML
-```
-
-Install core dependencies (NumPy, SciPy, Scikit-Learn, Joblib):
+Install minimal dependencies (NumPy, SciPy, Scikit-Learn, Joblib):
 ```bash
 pip install -r requirements.txt
 ```
 
-*(Optional)* If you wish to run 5G LDPC simulations with GPU/PyTorch acceleration and Sionna:
+### 2. Run Acceptance Test Suite
+
+Execute the physical validation gate:
 ```bash
-pip install -r requirements-ldpc.txt
+python -m unittest -v test_physics.py
+```
+
+All 14 tests must pass:
+```text
+test_01_unit_average_constellation_energy ... ok
+test_02_constellation_sizes ... ok
+test_03_gray_nearest_neighbour_consistency ... ok
+test_04_noiseless_round_trip ... ok
+test_05_coherent_demodulation_with_known_complex_h ... ok
+test_06_awgn_ber_sanity_analytical ... ok
+test_07_rayleigh_average_ber_analytical ... ok
+test_08_rayleigh_h_unit_average_power ... ok
+test_09_h_constant_across_entire_block ... ok
+test_10_independent_h_across_blocks ... ok
+test_11_deterministic_reproducibility ... ok
+test_12_different_block_identity_different_realization ... ok
+test_13_batch_and_individual_evaluation_agree ... ok
+test_14_modulation_order_invariance_for_paired_eval ... ok
 ```
 
 ---
 
-### 2. Verify Physics & System Integrity
+## 📜 Public API Overview
 
-Run the verification test suite to ensure mathematical anchors and physical layer calculations match theoretical bounds:
-```bash
-python test_physics.py
-```
+### `channel.py`
+- `make_block_rng(master_seed: int, block_id: int) -> BlockRNG`
+- `generate_channel_coefficient(rng, channel_type="rayleigh", h_magnitude=None) -> complex`
+- `generate_standard_noise(rng, num_symbols: int) -> np.ndarray`
+- `apply_channel(transmitted_symbols, snr_db, channel_type="rayleigh", h=None, ...) -> ChannelOutput`
 
----
+### `phy_engine.py`
+- `MODES`: Tuple of supported uncoded modes (`BPSK`, `QPSK`, `16QAM`, `64QAM`)
+- `constellation(bits_per_symbol: int) -> tuple[np.ndarray, np.ndarray]`
+- `modulate(bits: np.ndarray, bits_per_symbol: int) -> np.ndarray`
+- `demodulate(received_symbols: np.ndarray, h: complex, bits_per_symbol: int) -> np.ndarray`
+- `PHYEngine(block_symbols: int)`: Core evaluation engine (`evaluate_mode`, `evaluate_paired_block`)
 
-### 3. Run Benchmarks
-
-Run the standard numerical AMC evaluation:
-```bash
-# Fast uncoded benchmark across SNR grid
-python run_benchmark.py --coding uncoded --snrs 0 6 12 18 24 30 --output results/uncoded.json
-
-# LDPC joint adaptation benchmark
-python run_benchmark.py --coding ldpc --caps 5 10 --budget 10 --output results/ldpc.json
-```
-
-Verify generated benchmark results:
-```bash
-python verify_results.py
-```
-
----
-
-## 📂 Project Structure
-
-```
-├── channel.py                     # Channel models (AWGN, Rayleigh) & channel estimation
-├── phy_engine.py                  # Core PHY transceiver engine & modulation catalog
-├── policies.py                    # Adaptation policies (Fixed, LUT, Oracle, DT, RF)
-├── experiment.py                  # Protocol enforcement, data split & evaluation logic
-├── metrics.py                     # Performance metrics (BER, BLER, Goodput, EE)
-├── run_benchmark.py               # CLI entry point for running empirical studies
-├── test_physics.py                # Verification gate testing against analytical anchors
-├── verify_results.py              # Integrity checks on experiment outputs
-├── PHUONG_PHAP_LUAN_VA_THAM_KHAO.md # Full methodology, theory, and references (in Vietnamese)
-├── ml_model_selection_review.txt  # Model selection rationale and review
-├── requirements.txt               # Core dependencies
-└── requirements-ldpc.txt          # Optional LDPC & Sionna dependencies
-```
-
----
-
-## 📄 Documentation
-
-For deep technical details on the methodology, system assumptions, baseline comparisons, and theoretical background, refer to [PHUONG_PHAP_LUAN_VA_THAM_KHAO.md](PHUONG_PHAP_LUAN_VA_THAM_KHAO.md).
-
----
-
-## 📜 License
-
-MIT License.
+### `metrics.py`
+- `RawPHYCounters`: Stateful accumulator for bits, blocks, BER, and BLER
+- `compute_ber(bit_errors, total_bits) -> float`
+- `compute_bler(block_errors, total_blocks) -> float`
+- `compute_raw_goodput(bler, bits_per_symbol) -> float`

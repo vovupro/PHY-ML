@@ -1,21 +1,12 @@
 ---
 name: phy-executor
-description: Workspace-local terminal-first PHY-ML executor optimized for CUDA, PyTorch, Sionna, and direct execution without plan ceremonials.
-model: gemini-3.8-flash-high
-effort: high
+description: Terminal-first execution agent for the PHY-ML repository.
 mainAgent: true
+subagent: false
+model: inherit
+commandExecutionPolicy: eager
 inheritCustomizations: false
 inheritMcp: false
-skills:
-  - agy-customizations
-  - antigravity-guide
-  - google-antigravity-sdk
-  - managing-python-dependencies
-  - uv
-  - ml-best-practices
-  - literature-search-arxiv
-  - literature-search-europepmc
-  - literature-search-openalex
 ---
 
 # PHY Executor System Instructions

@@ -31,6 +31,7 @@ from sklearn.tree import DecisionTreeClassifier, export_text
 
 from ground_truth import (
     LookupTable1D,
+    LUTInterval,
     MODULATION_BPS,
 )
 
@@ -151,7 +152,15 @@ class CARTClassifier:
         return self.clf.predict_proba(X_arr)
 
     def get_threshold_splits(self) -> List[Dict[str, Any]]:
-        """Extract all internal split thresholds with explicit feature attribution."""
+        """Extract all internal split thresholds with explicit feature attribution.
+
+        This is the canonical split representation for generic multi-feature CART models.
+        Each split record contains:
+            - 'node_id': internal tree node index
+            - 'feature_index': integer column index of the splitting feature
+            - 'feature_name': name of the splitting feature
+            - 'threshold': scalar threshold value for feature <= threshold
+        """
         if not self.is_fitted:
             raise RuntimeError("Classifier must be fitted before extracting threshold splits.")
 
@@ -174,7 +183,13 @@ class CARTClassifier:
         return sorted(splits, key=lambda s: s["threshold"])
 
     def get_learned_thresholds(self) -> List[float]:
-        """Extract sorted list of split thresholds across all internal nodes."""
+        """Extract flat sorted list of numeric split thresholds across all internal nodes.
+
+        NOTE: This method is a flat convenience helper maintained primarily for 1D single-feature
+        workflows and backward compatibility. For multi-feature CART models, use get_threshold_splits(),
+        as globally sorted numeric thresholds across heterogeneous feature dimensions are not physically
+        comparable or meaningful without feature attribution.
+        """
         splits = self.get_threshold_splits()
         return [s["threshold"] for s in splits]
 
@@ -387,6 +402,101 @@ def load_ground_truth_samples(csv_path: Union[str, Path]) -> Tuple[List[float], 
     """Legacy helper for loading 1D SNR and BestMode labels."""
     X, y, _ = load_ground_truth_dataset(csv_path=csv_path, feature_names=["snr_db"], target_col="best_mode")
     return list(X[:, 0]), list(y)
+
+
+def load_lut_csv(csv_path: Union[str, Path] = "results/l3_final/lut_1d.csv") -> LookupTable1D:
+    """Load 1D Look-Up Table policy directly from frozen L3 LUT CSV artifact.
+
+    Args:
+        csv_path: Path to LUT CSV file (results/l3_final/lut_1d.csv).
+
+    Returns:
+        LookupTable1D instance with intervals, switching thresholds, and non-monotonic checks.
+    """
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"L3 1D LUT file not found at: {path}")
+
+    intervals: List[LUTInterval] = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            min_s = -float("inf") if row["min_snr_db"].strip().lower() == "-inf" else float(row["min_snr_db"])
+            max_s = float("inf") if row["max_snr_db"].strip().lower() == "inf" else float(row["max_snr_db"])
+            m = str(row["mode"]).strip()
+            bps = int(row["bits_per_symbol"])
+            intervals.append(LUTInterval(min_snr=min_s, max_snr=max_s, mode=m, bits_per_symbol=bps))
+
+    thresholds: List[Tuple[float, str, str]] = []
+    non_monotonic: List[Tuple[float, str, str]] = []
+    for i in range(len(intervals) - 1):
+        curr = intervals[i]
+        nxt = intervals[i + 1]
+        th = curr.max_snr
+        thresholds.append((th, curr.mode, nxt.mode))
+        if nxt.bits_per_symbol < curr.bits_per_symbol:
+            non_monotonic.append((th, curr.mode, nxt.mode))
+
+    return LookupTable1D(intervals=intervals, thresholds=thresholds, non_monotonic_transitions=non_monotonic)
+
+
+def load_lut_from_ground_truth_csv(
+    csv_path: Union[str, Path] = "results/l3_final/ground_truth_1d.csv",
+) -> LookupTable1D:
+    """Derive 1D Look-Up Table policy solely from frozen L3 ground truth CSV without L2 calibration data.
+
+    Args:
+        csv_path: Path to ground truth CSV (results/l3_final/ground_truth_1d.csv).
+
+    Returns:
+        LookupTable1D instance constructed from switching points in ground_truth_1d.csv.
+    """
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"L3 ground truth dataset not found at: {path}")
+
+    rows: List[Tuple[float, str, int]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            snr = float(r["snr_db"])
+            mode = str(r["best_mode"]).strip()
+            bps = int(r["best_mode_bps"]) if "best_mode_bps" in r else MODULATION_BPS[mode]
+            rows.append((snr, mode, bps))
+
+    if not rows:
+        raise ValueError(f"No ground truth rows found in {path}")
+
+    rows.sort(key=lambda x: x[0])
+    thresholds: List[Tuple[float, str, str]] = []
+    non_monotonic: List[Tuple[float, str, str]] = []
+    for i in range(len(rows) - 1):
+        curr_snr, curr_mode, curr_bps = rows[i]
+        nxt_snr, nxt_mode, nxt_bps = rows[i + 1]
+        if curr_mode != nxt_mode:
+            th = 0.5 * (curr_snr + nxt_snr)
+            thresholds.append((th, curr_mode, nxt_mode))
+            if nxt_bps < curr_bps:
+                non_monotonic.append((th, curr_mode, nxt_mode))
+
+    intervals: List[LUTInterval] = []
+    lower_bound = -float("inf")
+    for th, prev_mode, next_mode in thresholds:
+        bps = MODULATION_BPS[prev_mode]
+        intervals.append(LUTInterval(min_snr=lower_bound, max_snr=th, mode=prev_mode, bits_per_symbol=bps))
+        lower_bound = th
+
+    final_mode = rows[-1][1]
+    intervals.append(
+        LUTInterval(
+            min_snr=lower_bound,
+            max_snr=float("inf"),
+            mode=final_mode,
+            bits_per_symbol=MODULATION_BPS[final_mode],
+        )
+    )
+
+    return LookupTable1D(intervals=intervals, thresholds=thresholds, non_monotonic_transitions=non_monotonic)
 
 
 # =====================================================================
@@ -723,30 +833,17 @@ def run_1d_cart_experiment(
     labels = list(y)
     print(f"Loaded {len(snrs)} samples across features: {metadata['feature_names']}.")
 
-    # Load 1D LUT reference from L3 final
-    lut_csv = Path("results/l3_final/lut_1d.csv")
+    # Load 1D LUT reference directly from frozen L3 artifacts (strictly no L2 dependency)
+    lut_csv = Path(data_path).parent / "lut_1d.csv"
+    if not lut_csv.exists():
+        lut_csv = Path("results/l3_final/lut_1d.csv")
+
     if lut_csv.exists():
-        intervals = []
-        with open(lut_csv, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                min_s = -float("inf") if row["min_snr_db"] == "-inf" else float(row["min_snr_db"])
-                max_s = float("inf") if row["max_snr_db"] == "inf" else float(row["max_snr_db"])
-                m = str(row["mode"]).strip()
-                bps = int(row["bits_per_symbol"])
-                intervals.append(LookupTable1D.from_ground_truth.__closure__[0].cell_contents.intervals if False else None)
-        # Derive cleanly using LookupTable1D from ground_truth_1d.csv rows
-        from ground_truth import load_calibration_csv, compute_ground_truth, GroundTruthConfig
-        cal_path = Path("results/l2_cuda_rtx3060_final/calibration_1d_cuda_pooled.csv")
-        cal_data = load_calibration_csv(cal_path)
-        gt_rows = compute_ground_truth(cal_data, GroundTruthConfig(ber_target=0.01))
-        lut = LookupTable1D.from_ground_truth(gt_rows)
+        print(f"Loading 1D LUT reference from: {lut_csv}")
+        lut = load_lut_csv(lut_csv)
     else:
-        from ground_truth import load_calibration_csv, compute_ground_truth, GroundTruthConfig
-        cal_path = Path("results/l2_cuda_rtx3060_final/calibration_1d_cuda_pooled.csv")
-        cal_data = load_calibration_csv(cal_path)
-        gt_rows = compute_ground_truth(cal_data, GroundTruthConfig(ber_target=0.01))
-        lut = LookupTable1D.from_ground_truth(gt_rows)
+        print(f"Deriving 1D LUT reference solely from ground truth: {path}")
+        lut = load_lut_from_ground_truth_csv(path)
 
     print("\nSweeping max_depth in {1, 2, 3, 4, 5}...")
     sweep_results = sweep_cart_depths(

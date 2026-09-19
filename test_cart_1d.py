@@ -10,6 +10,8 @@ from cart_1d import (
     sweep_cart_depths,
     TreeMetrics,
     load_ground_truth_dataset,
+    load_lut_csv,
+    load_lut_from_ground_truth_csv,
     save_model,
     load_model,
 )
@@ -267,6 +269,38 @@ class TestCART1D(unittest.TestCase):
         self.assertTrue(l2_path.exists(), "L2 final dataset must exist")
         self.assertTrue(l3_path.exists(), "L3 final dataset must exist")
 
+    def test_load_lut_csv_direct_l3_dependency(self):
+        """Verify load_lut_csv loads directly from frozen L3 CSV with correct thresholds."""
+        lut_path = Path("results/l3_final/lut_1d.csv")
+        self.assertTrue(lut_path.exists(), "results/l3_final/lut_1d.csv must exist")
+        lut = load_lut_csv(lut_path)
+        thresholds = [th[0] for th in lut.thresholds]
+        self.assertEqual(thresholds, [16.75, 22.75, 28.25])
+        self.assertEqual(len(lut.intervals), 4)
+        self.assertEqual(lut.intervals[0].mode, "BPSK")
+        self.assertEqual(lut.intervals[1].mode, "QPSK")
+        self.assertEqual(lut.intervals[2].mode, "16QAM")
+        self.assertEqual(lut.intervals[3].mode, "64QAM")
+
+    def test_load_lut_from_ground_truth_csv(self):
+        """Verify load_lut_from_ground_truth_csv matches load_lut_csv without any L2 access."""
+        gt_path = Path("results/l3_final/ground_truth_1d.csv")
+        self.assertTrue(gt_path.exists(), "results/l3_final/ground_truth_1d.csv must exist")
+        lut_from_gt = load_lut_from_ground_truth_csv(gt_path)
+        lut_from_csv = load_lut_csv("results/l3_final/lut_1d.csv")
+
+        self.assertEqual(lut_from_gt.thresholds, lut_from_csv.thresholds)
+        self.assertEqual(lut_from_gt.intervals, lut_from_csv.intervals)
+        self.assertEqual(lut_from_gt.non_monotonic_transitions, lut_from_csv.non_monotonic_transitions)
+
+    def test_l4_no_runtime_l2_dependencies(self):
+        """Verify cart_1d module has no runtime references to L2 calibration functions or paths."""
+        import cart_1d
+        self.assertFalse(hasattr(cart_1d, "load_calibration_csv"))
+        self.assertFalse(hasattr(cart_1d, "compute_ground_truth"))
+        self.assertFalse(hasattr(cart_1d, "GroundTruthConfig"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

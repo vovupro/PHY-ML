@@ -5,7 +5,42 @@ This document defines the configuration, architecture, and profile characteristi
 ## Files Created / Changed
 
 - `.agents/agents/phy-executor/agent.md`: Workspace-local custom agent definition in Antigravity 1.2.7 Markdown agent format, specifying minimal YAML frontmatter and H1-delimited system instructions.
-- `docs/terminal_first_profile.md`: Documentation profile detailing configuration mechanisms and execution commands.
+- `docs/terminal_first_profile.md`: Documentation profile detailing configuration mechanisms, split-machine architecture, and execution commands.
+
+## Split-Machine Architecture
+
+The development and execution lifecycle is split across two dedicated nodes with GitHub acting as the synchronization and handoff boundary:
+
+1. **Local Control Node (Windows Laptop - Intel i5-1240P)**:
+   - **Environment**: Host development machine running Antigravity CLI. No local CUDA GPU or RTX 3060 is assumed.
+   - **Agent Scope**: The `phy-executor` agent profile is intended to run on the **Local Control Node only**. CKEY is a remote execution target, not an Antigravity development workspace.
+   - **Responsibilities**: Code inspection, authoring, refactoring, lightweight dependency-light checks, syntax checks, git diff reviews, commits, and pushes.
+   - **Execution Policy**: Heavy Monte Carlo loops, CUDA calibration, GPU benchmarks, and full PHY acceptance test suites are **not** executed locally.
+
+2. **Remote Compute Node (CKEY - Linux with NVIDIA RTX 3060)**:
+   - **Environment**: Canonical scientific runtime with project `.venv`, PyTorch with CUDA (`sm_86`), and Sionna 2.0 primitives.
+   - **Role & Constraints**: CKEY is an **execution and verification node only, NOT a development/editing node**. Scientific source code must **not** be edited directly on CKEY. If remote verification fails, report the failure and perform the fix on the Local Control Node, then commit/push and rerun remotely.
+   - **Responsibilities**: Full PHY acceptance test suites, Monte Carlo calibration runs, GPU benchmarks, and heavy numerical/ML workloads.
+   - **Synchronization**: Pulls changes from GitHub (`git pull`).
+   - **Verification State**: Scientific changes requiring CUDA/Sionna are considered **pending** until executed and verified on CKEY.
+
+3. **Handoff Workflow**:
+   ```text
+   [Local Control Node] (phy-executor runs here)
+     └── Edit / Refactor Code
+     └── Lightweight Static / Logic Check
+     └── Inspect git diff
+     └── Commit & Push to GitHub
+              │
+              ▼ (git pull)
+   [Remote Compute Node (CKEY)] (Execution / Verification only; no editing)
+     └── Run Full PHY Acceptance Tests / PyTorch CUDA Simulations
+     └── Generate / Verify Results
+              │
+              ▼ (if verification fails)
+   [Local Control Node]
+     └── Investigate failure report -> Apply fix -> Commit & Push -> Rerun on CKEY
+   ```
 
 ## Exact Custom-Agent Mechanism
 
@@ -24,8 +59,8 @@ This document defines the configuration, architecture, and profile characteristi
   - Enforces direct execution with zero planning ceremony (no unsolicited Implementation Plans).
   - Preserves immutable physics assumptions, BER/BLER semantics, stopping conditions, and ML targets.
   - Guarantees historical result immutability under `results/`.
-  - Enforces offloading heavy Monte Carlo and CUDA computation to background Python scripts rather than LLM reasoning loops.
-  - Mandates testing before committing and using Git as durable checkpointing.
+  - Packages heavy compute as reproducible standalone scripts/commands for execution on CKEY rather than local execution.
+  - Enforces local lightweight checks prior to commit and remote CKEY verification for full scientific validation.
 
 ## Configuration & Model Selection
 

@@ -180,7 +180,7 @@ class CARTClassifier:
                     "feature_name": feat_name,
                     "threshold": float(tree.threshold[i]),
                 })
-        return sorted(splits, key=lambda s: s["threshold"])
+        return splits
 
     def get_learned_thresholds(self) -> List[float]:
         """Extract flat sorted list of numeric split thresholds across all internal nodes.
@@ -190,8 +190,7 @@ class CARTClassifier:
         as globally sorted numeric thresholds across heterogeneous feature dimensions are not physically
         comparable or meaningful without feature attribution.
         """
-        splits = self.get_threshold_splits()
-        return [s["threshold"] for s in splits]
+        return sorted(s["threshold"] for s in self.get_threshold_splits())
 
     def export_tree_text(self, feature_names: Optional[Sequence[str]] = None) -> str:
         """Export readable ASCII representation of the learned tree structure."""

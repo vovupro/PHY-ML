@@ -143,6 +143,48 @@ class TestCART1D(unittest.TestCase):
             self.assertIn(s["feature_name"], ["snr_db", "abs_h"])
             self.assertIn(s["feature_index"], [0, 1])
 
+    def test_multifeature_split_preserves_tree_node_order_without_global_sorting(self):
+        """Verify get_threshold_splits preserves natural tree node order and avoids cross-feature sorting."""
+        # 2D dataset where root splits on snr_db (threshold 15.0) and child splits on abs_h (threshold 0.5)
+        X = np.array([
+            [5.0, 0.2],
+            [5.0, 0.8],
+            [25.0, 0.2],
+            [25.0, 0.8],
+        ], dtype=np.float64)
+        y = ["MODE_A", "MODE_A", "MODE_B", "MODE_C"]
+
+        clf = CARTClassifier(max_depth=3, random_state=20260918, feature_names=["snr_db", "abs_h"])
+        clf.fit(X, y)
+
+        splits = clf.get_threshold_splits()
+        self.assertEqual(len(splits), 2)
+
+        # 1. Verify split records preserve node/tree order (node_id order)
+        node_ids = [s["node_id"] for s in splits]
+        self.assertEqual(node_ids, [0, 2])
+
+        # 2. Verify each record retains complete attribution metadata
+        self.assertEqual(splits[0]["node_id"], 0)
+        self.assertEqual(splits[0]["feature_index"], 0)
+        self.assertEqual(splits[0]["feature_name"], "snr_db")
+        self.assertAlmostEqual(splits[0]["threshold"], 15.0, places=4)
+
+        self.assertEqual(splits[1]["node_id"], 2)
+        self.assertEqual(splits[1]["feature_index"], 1)
+        self.assertEqual(splits[1]["feature_name"], "abs_h")
+        self.assertAlmostEqual(splits[1]["threshold"], 0.5, places=4)
+
+        # 3. Verify no global cross-feature threshold ordering is assumed
+        # Thresholds in node order are [15.0, 0.5], NOT sorted across heterogeneous features
+        raw_split_thresholds = [s["threshold"] for s in splits]
+        self.assertGreater(raw_split_thresholds[0], raw_split_thresholds[1])  # 15.0 > 0.5
+
+        # In contrast, get_learned_thresholds() explicitly sorts thresholds for 1D convenience
+        flat_sorted = clf.get_learned_thresholds()
+        self.assertEqual(flat_sorted, sorted(raw_split_thresholds))
+        self.assertLess(flat_sorted[0], flat_sorted[1])  # 0.5 < 15.0
+
     def test_arbitrary_feature_names(self):
         """Verify arbitrary feature names are correctly attributed and exported."""
         X_2d = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]], dtype=np.float64)

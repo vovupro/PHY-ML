@@ -16,9 +16,9 @@ import sionna
 @dataclass
 class ExecutionConfig:
     """Execution configuration parameters."""
-    backend: str = "auto"              # 'auto', 'cpu', 'cuda'
-    precision: str = "double"          # 'double', 'single'
-    batch_blocks: int = 2000           # Blocks per chunk batch
+    backend: str = "cuda"              # Frozen for production Monte Carlo: 'cuda'
+    precision: str = "double"          # Frozen for production Monte Carlo: 'double' (FP64)
+    batch_blocks: int = 500            # Frozen for production Monte Carlo: 500 blocks/chunk
     cpu_threads: Optional[int] = 12    # Intra-op PyTorch CPU threads
     fresh_run: bool = True             # Do not reuse previous cache
     results_dir: str = "results/l2_cuda_rtx3060"

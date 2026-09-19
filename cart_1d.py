@@ -272,7 +272,8 @@ if __name__ == "__main__":
     snrs, labels = load_ground_truth_samples(gt_path)
     print(f"Loaded {len(snrs)} ground truth samples from {gt_path}.")
 
-    cal_path = Path("results/calibration_1d_rayleigh.csv")
+    default_cal_path = Path("results/l2_cuda_rtx3060/calibration_1d_cuda_pooled.csv")
+    cal_path = default_cal_path if default_cal_path.exists() else Path("results/calibration_1d_rayleigh.csv")
     cal_data = load_calibration_csv(cal_path)
     gt_rows = compute_ground_truth(cal_data, GroundTruthConfig(ber_target=0.01))
     lut = LookupTable1D.from_ground_truth(gt_rows)

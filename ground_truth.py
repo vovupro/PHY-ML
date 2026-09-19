@@ -514,7 +514,8 @@ def generate_l3_report(
 
 if __name__ == "__main__":
     print("=== PHY-ML: L3 Ground Truth & Baseline Policies ===")
-    csv_path = Path("results/calibration_1d_rayleigh.csv")
+    default_cal_path = Path("results/l2_cuda_rtx3060/calibration_1d_cuda_pooled.csv")
+    csv_path = default_cal_path if default_cal_path.exists() else Path("results/calibration_1d_rayleigh.csv")
 
     config = GroundTruthConfig(
         ber_target=0.01,  # 1% target uncoded BER

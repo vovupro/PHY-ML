@@ -94,6 +94,46 @@ class OnlineBlockStats:
         return float(self.std_block_ber / math.sqrt(self.count))
 
 
+
+@dataclass
+class PHYRealization:
+    """Exact physical layer realization containing payload bits, fading channel, and noise.
+
+    Reused across backends (CPU, CUDA) and precisions (FP64, FP32) to evaluate true exact-realization parity.
+    """
+    payload_pool: torch.Tensor  # shape: (B, s_sym * max_m), binary bits
+    h: torch.Tensor             # shape: (B, 1), complex Rayleigh channel coefficients
+    z: torch.Tensor             # shape: (B, s_sym), complex standard normal noise
+
+
+def generate_physical_realization(
+    num_blocks: int,
+    symbols_per_block: int = 1536,
+    max_bits_per_symbol: int = 6,
+    seed: int = 42,
+    dtype_real: torch.dtype = torch.float64,
+    dtype_complex: torch.dtype = torch.complex128,
+) -> PHYRealization:
+    """Generate a single deterministic physical realization once on CPU in high precision."""
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    payload = torch.randint(
+        0, 2, (num_blocks, symbols_per_block * max_bits_per_symbol),
+        generator=gen,
+        dtype=dtype_real,
+    )
+    # Rayleigh fading: CN(0, 1) -> Var(real) = Var(imag) = 1/2
+    h_r = torch.randn((num_blocks, 1), generator=gen, dtype=dtype_real) / math.sqrt(2.0)
+    h_i = torch.randn((num_blocks, 1), generator=gen, dtype=dtype_real) / math.sqrt(2.0)
+    h = torch.complex(h_r, h_i)
+
+    # Standard complex Gaussian noise: CN(0, 1) -> Var(real) = Var(imag) = 1/2
+    z_r = torch.randn((num_blocks, symbols_per_block), generator=gen, dtype=dtype_real) / math.sqrt(2.0)
+    z_i = torch.randn((num_blocks, symbols_per_block), generator=gen, dtype=dtype_real) / math.sqrt(2.0)
+    z = torch.complex(z_r, z_i)
+
+    return PHYRealization(payload_pool=payload, h=h, z=z)
+
+
 class BatchPHYEngine:
     """High-throughput vectorized Physical Layer engine for GPU and CPU backends."""
 
@@ -135,67 +175,34 @@ class BatchPHYEngine:
         self.max_m = max(m.bits_per_symbol for m in self.modes)
 
     @torch.inference_mode()
-    def evaluate_chunk(
+    def _evaluate_payload_and_channel(
         self,
         snr_db: float,
-        num_blocks: int,
-        fading_seed: int,
-        noise_seed: int,
-        bit_seed: int,
-    ) -> Dict[int, Tuple[int, int, int, float, float]]:
-        """Evaluate a vectorized chunk of transmission blocks entirely on-device.
-
-        Parameters
-        ----------
-        snr_db : float
-            Nominal setup Es/N0 in dB.
-        num_blocks : int
-            Number of blocks in this chunk batch (B).
-        fading_seed, noise_seed, bit_seed : int
-            Deterministic seeds for independent RNG streams.
-
-        Returns
-        -------
-        results : Dict[mode_id, (chunk_errors, chunk_total_bits, chunk_block_errors, chunk_mean_ber, chunk_m2_ber)]
-            Compact summary metrics transferred to host CPU.
-        """
-        b_size = num_blocks
+        payload_pool: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
+        return_rx_bits: bool = False,
+    ) -> Tuple[Dict[int, Tuple[int, int, int, float, float]], Optional[Dict[int, torch.Tensor]]]:
+        """Core physical layer transmission, detection, and reduction pipeline."""
+        b_size = payload_pool.shape[0]
         s_sym = self.symbols_per_block
         dev = self.device
         r_dtype = self.real_dtype
-        c_dtype = self.complex_dtype
         prec_str = self.sionna_precision
 
-        # 1. Setup channel noise variance N0 = 1 / db_to_lin(snr_db)
+        # Setup channel noise variance N0 = 1 / db_to_lin(snr_db)
         esno_lin = db_to_lin(snr_db, precision=prec_str, device=str(dev))
         n0_t = (1.0 / esno_lin).to(dtype=r_dtype, device=dev)
         sqrt_n0 = torch.sqrt(n0_t)
 
-        # 2. Sample independent Rayleigh flat fading coefficients on device: Shape (B, 1)
-        self.gfc.torch_rng.manual_seed(fading_seed)
-        h = self.gfc(batch_size=b_size).squeeze().unsqueeze(-1).to(dtype=c_dtype, device=dev)
-
-        # 3. Sample standardized complex Gaussian noise CN(0, 1) on device: Shape (B, s_sym)
-        gen_noise = torch.Generator(device=dev).manual_seed(noise_seed) if dev.type == "cuda" else torch.Generator().manual_seed(noise_seed)
-        z = complex_normal([b_size, s_sym], precision=prec_str, device=str(dev), generator=gen_noise)
-
-        # 4. Sample common bit payload pool on device: Shape (B, s_sym * max_m)
-        gen_bits = torch.Generator(device=dev).manual_seed(bit_seed) if dev.type == "cuda" else torch.Generator().manual_seed(bit_seed)
-        payload_pool = torch.randint(
-            0, 2, (b_size, s_sym * self.max_m),
-            generator=gen_bits,
-            dtype=r_dtype,
-            device=dev,
-        )
-
-        # 5. Precompute channel terms on device
         abs_h_sq = torch.abs(h) ** 2
         n0_eff = torch.clamp(n0_t / abs_h_sq, min=1e-12)
         actual_noise = sqrt_n0 * z
 
         chunk_metrics: Dict[int, Tuple[int, int, int, float, float]] = {}
+        rx_bits_map: Optional[Dict[int, torch.Tensor]] = {} if return_rx_bits else None
 
-        # 6. Paired evaluation across candidate modulations
+        mode_tensors = []
         for m in self.modes:
             req_bits = s_sym * m.bits_per_symbol
             tx_bits = payload_pool[:, :req_bits]
@@ -211,6 +218,8 @@ class BatchPHYEngine:
 
             # Sionna hard APP demapping
             rx_bits = demapper(y_eq, n0_eff)
+            if return_rx_bits and rx_bits_map is not None:
+                rx_bits_map[m.mode_id] = rx_bits.cpu()
 
             # On-device error counts and block statistics
             err_mask = (tx_bits != rx_bits)
@@ -218,13 +227,90 @@ class BatchPHYEngine:
             block_errors_per_block = (bit_errors_per_block > 0)
             ber_per_block = bit_errors_per_block.to(torch.float64) / float(req_bits)
 
-            # Compact reduction on device
-            total_errs = int(bit_errors_per_block.sum().item())
-            total_blk_errs = int(block_errors_per_block.sum().item())
-            mean_ber = float(ber_per_block.mean().item())
-            m2_ber = float(((ber_per_block - mean_ber) ** 2).sum().item())
-            total_bits_chunk = b_size * req_bits
+            total_errs_t = bit_errors_per_block.sum()
+            total_blk_errs_t = block_errors_per_block.sum()
+            mean_ber_t = ber_per_block.mean()
+            m2_ber_t = ((ber_per_block - mean_ber_t) ** 2).sum()
 
-            chunk_metrics[m.mode_id] = (total_errs, total_bits_chunk, total_blk_errs, mean_ber, m2_ber)
+            mode_tensors.append(torch.stack([
+                total_errs_t.to(torch.float64),
+                total_blk_errs_t.to(torch.float64),
+                mean_ber_t,
+                m2_ber_t,
+            ]))
 
-        return chunk_metrics
+        # Single device-to-host transfer for all candidate modulations
+        all_metrics = torch.stack(mode_tensors).cpu().tolist()
+        for idx, m in enumerate(self.modes):
+            t_errs, t_blk_errs, m_ber, m2_b = all_metrics[idx]
+            req_bits = s_sym * m.bits_per_symbol
+            chunk_metrics[m.mode_id] = (
+                int(t_errs),
+                b_size * req_bits,
+                int(t_blk_errs),
+                float(m_ber),
+                float(m2_b),
+            )
+
+        return chunk_metrics, rx_bits_map
+
+    @torch.inference_mode()
+    def evaluate_chunk(
+        self,
+        snr_db: float,
+        num_blocks: int,
+        fading_seed: int,
+        noise_seed: int,
+        bit_seed: int,
+    ) -> Dict[int, Tuple[int, int, int, float, float]]:
+        """Evaluate a vectorized chunk of transmission blocks entirely on-device with RNG seeds."""
+        b_size = num_blocks
+        s_sym = self.symbols_per_block
+        dev = self.device
+        r_dtype = self.real_dtype
+        c_dtype = self.complex_dtype
+        prec_str = self.sionna_precision
+
+        # Sample channel, noise, and bits on device
+        self.gfc.torch_rng.manual_seed(fading_seed)
+        h = self.gfc(batch_size=b_size).squeeze().unsqueeze(-1).to(dtype=c_dtype, device=dev)
+
+        gen_noise = torch.Generator(device=dev).manual_seed(noise_seed) if dev.type == "cuda" else torch.Generator().manual_seed(noise_seed)
+        z = complex_normal([b_size, s_sym], precision=prec_str, device=str(dev), generator=gen_noise)
+
+        gen_bits = torch.Generator(device=dev).manual_seed(bit_seed) if dev.type == "cuda" else torch.Generator().manual_seed(bit_seed)
+        payload_pool = torch.randint(
+            0, 2, (b_size, s_sym * self.max_m),
+            generator=gen_bits,
+            dtype=r_dtype,
+            device=dev,
+        )
+
+        metrics, _ = self._evaluate_payload_and_channel(snr_db, payload_pool, h, z, return_rx_bits=False)
+        return metrics
+
+    @torch.inference_mode()
+    def evaluate_realization(
+        self,
+        snr_db: float,
+        realization: PHYRealization,
+        return_rx_bits: bool = False,
+    ) -> Union[
+        Dict[int, Tuple[int, int, int, float, float]],
+        Tuple[Dict[int, Tuple[int, int, int, float, float]], Dict[int, torch.Tensor]],
+    ]:
+        """Evaluate an externally supplied exact physical realization.
+
+        Ensures bit-for-bit physical parity across hardware backends and precisions.
+        """
+        dev = self.device
+        h_dev = realization.h.to(device=dev, dtype=self.complex_dtype)
+        z_dev = realization.z.to(device=dev, dtype=self.complex_dtype)
+        payload_dev = realization.payload_pool.to(device=dev, dtype=self.real_dtype)
+
+        metrics, rx_bits_map = self._evaluate_payload_and_channel(
+            snr_db, payload_dev, h_dev, z_dev, return_rx_bits=return_rx_bits
+        )
+        if return_rx_bits and rx_bits_map is not None:
+            return metrics, rx_bits_map
+        return metrics

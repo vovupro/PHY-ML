@@ -107,10 +107,36 @@ class RawPHYCounters:
         }
 
 
+
+BER_TARGET: float = 0.01
+CONFIDENCE_K: float = 1.96
+
+
+def is_reliability_uncertain(
+    ber: float,
+    se: float,
+    target: float = BER_TARGET,
+    k: float = CONFIDENCE_K,
+) -> bool:
+    """Determine whether the empirical 95% confidence interval overlaps BER_target.
+
+    Exact criterion:
+        ci_low <= target <= ci_high
+    where ci_low = max(0.0, ber - k*se) and ci_high = ber + k*se.
+    Heuristic windows such as [0.009, 0.011] or [0.008, 0.012] are strictly excluded.
+    """
+    ci_low = max(0.0, float(ber - k * se))
+    ci_high = float(ber + k * se)
+    return ci_low <= float(target) <= ci_high
+
+
 __all__ = [
     "count_errors",
     "count_block_errors",
     "compute_ber",
     "compute_bler",
     "RawPHYCounters",
+    "BER_TARGET",
+    "CONFIDENCE_K",
+    "is_reliability_uncertain",
 ]

@@ -26,6 +26,7 @@ from config import ExecutionConfig, probe_environment, print_environment_report
 from phy_engine import ModulationMode, MODES
 from cuda_engine import BatchPHYEngine, OnlineBlockStats
 from calibration_1d import theoretical_bpsk_rayleigh
+from metrics import is_reliability_uncertain, BER_TARGET
 
 
 GRID_25_POINTS: Tuple[float, ...] = (
@@ -390,10 +391,8 @@ def run_fresh_l2_cuda_calibration(
                 tot_blks = sa.count + sb.count
                 tot_blk_errs = sa.block_errors + sb.block_errors
 
-                # Uncertainty semantics: mark if 95% CI straddles target or within [0.009, 0.011]
-                ci_low = ber_pool - 1.96 * se_pool
-                ci_high = ber_pool + 1.96 * se_pool
-                uncertain = (ci_low <= 0.01 <= ci_high) or (0.009 <= ber_pool <= 0.011)
+                # Uncertainty semantics: mark if empirical 95% CI overlaps BER_target = 0.01 exactly
+                uncertain = is_reliability_uncertain(ber_pool, se_pool)
 
                 writer.writerow({
                     "mode_id": m.mode_id,
@@ -469,12 +468,24 @@ def generate_markdown_report(
     total_mc_time: float,
     total_blocks_simulated: int,
     output_path: Path,
+    persisted_benchmark: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Format thesis-quality calibration verification and convergence report."""
     throughput = total_blocks_simulated / total_mc_time
     symbols_sec = throughput * config.symbols_per_block
-    ref_cpu_throughput = 52.0  # From fair benchmark measurement
-    speedup = throughput / ref_cpu_throughput
+
+    # Speedup is only reported if backed by an explicit persisted benchmark (Requirement 2)
+    speedup_line = "- **Speedup vs. Reference CPU Implementation:** `N/A` (no persisted benchmark provided; hard-coded reference disallowed)"
+    if persisted_benchmark is not None:
+        ref_cpu_throughput = None
+        if "Reference CPU Double" in persisted_benchmark:
+            ref_cpu_throughput = persisted_benchmark["Reference CPU Double"].get("blocks_per_sec")
+        elif "ref_cpu_throughput" in persisted_benchmark:
+            ref_cpu_throughput = persisted_benchmark["ref_cpu_throughput"]
+
+        if ref_cpu_throughput and ref_cpu_throughput > 0:
+            speedup = throughput / ref_cpu_throughput
+            speedup_line = f"- **Speedup vs. Reference CPU Implementation:** `~{speedup:.2f}x` (from measured {ref_cpu_throughput:.1f} blocks/s to {throughput:.1f} blocks/s)"
 
     lines = [
         "# PHY-ML L2 Monte Carlo Calibration Report (CUDA / RTX 3060 Rebuild)",
@@ -493,9 +504,9 @@ def generate_markdown_report(
         f"  - **Pure Monte Carlo Simulation:** `{total_mc_time:.2f} seconds`",
         f"- **Total Blocks Evaluated:** `{total_blocks_simulated:,} independent blocks`",
         f"- **Total Independent Channel Realizations ($h$):** `{total_blocks_simulated:,}`",
-        f"- **Peak Throughput:** `{throughput:,.1f} blocks/second`",
+        f"- **Overall Average Throughput:** `{throughput:,.1f} blocks/second`",
         f"- **Symbol Throughput:** `{symbols_sec:,.0f} symbols/second`",
-        f"- **Speedup vs. Reference CPU Implementation:** `~{speedup:.2f}x` (from 52.0 blocks/s to {throughput:.1f} blocks/s)",
+        speedup_line,
         "",
         "---",
         "",
@@ -572,7 +583,7 @@ def generate_markdown_report(
             p_se = res["final_pooled_se"][m.mode_id]
             low = max(0.0, p_ber - 1.96 * p_se)
             high = p_ber + 1.96 * p_se
-            if (low <= 0.01 <= high) or (0.008 <= p_ber <= 0.012):
+            if is_reliability_uncertain(p_ber, p_se):
                 lines.append(
                     f"| {snr_db:8.1f} | {m.modulation:10s} | {p_ber:10.5e} | [{low:.5e}, {high:.5e}] | `reliability_uncertain` |"
                 )

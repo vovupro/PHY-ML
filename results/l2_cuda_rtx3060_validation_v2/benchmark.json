@@ -1,0 +1,133 @@
+{
+  "hardware_environment": {
+    "torch_version": "2.6.0+cu124",
+    "sionna_version": "2.0.0",
+    "cuda_available": true,
+    "cuda_runtime_version": "12.4",
+    "gpu_name": "NVIDIA GeForce RTX 3060",
+    "vram": "12.00 GB (12288 MiB)",
+    "cpu_logical_threads": 16
+  },
+  "cpu_tuning": {
+    "best_threads": 16,
+    "benchmarks": {
+      "8": {
+        "elapsed": 3.2293800999996165,
+        "throughput": 309.6569524287707
+      },
+      "10": {
+        "elapsed": 2.83985709999979,
+        "throughput": 352.1303941666903
+      },
+      "12": {
+        "elapsed": 2.6829194000001735,
+        "throughput": 372.72830484580913
+      },
+      "16": {
+        "elapsed": 2.586186099999395,
+        "throughput": 386.66977600731593
+      }
+    }
+  },
+  "gpu_tuning_fp32": {
+    "best_batch": 500,
+    "details": [
+      {
+        "batch_size": 500,
+        "elapsed": 0.6017009999995935,
+        "throughput": 6647.820096697034,
+        "peak_vram_mb": 2179.0849609375,
+        "status": "OK"
+      },
+      {
+        "batch_size": 1000,
+        "elapsed": 0.65005679999922,
+        "throughput": 6153.308449361348,
+        "peak_vram_mb": 4359.84521484375,
+        "status": "OK"
+      },
+      {
+        "batch_size": 2000,
+        "elapsed": 1.5706492999997863,
+        "throughput": 2546.717462644617,
+        "peak_vram_mb": 8709.92822265625,
+        "status": "OK"
+      },
+      {
+        "batch_size": 4000,
+        "elapsed": 7.667508799999268,
+        "throughput": 521.6818270883995,
+        "peak_vram_mb": 17415.5615234375,
+        "status": "OK"
+      }
+    ]
+  },
+  "gpu_tuning_fp64": {
+    "best_batch": 500,
+    "details": [
+      {
+        "batch_size": 500,
+        "elapsed": 2.2080494000001636,
+        "throughput": 1811.5536726667908,
+        "peak_vram_mb": 4356.9072265625,
+        "status": "OK"
+      },
+      {
+        "batch_size": 1000,
+        "elapsed": 3.685153899999932,
+        "throughput": 1085.4363504330372,
+        "peak_vram_mb": 8704.08349609375,
+        "status": "OK"
+      },
+      {
+        "batch_size": 2000,
+        "elapsed": 14.367909700000382,
+        "throughput": 278.3981862024017,
+        "peak_vram_mb": 17403.248046875,
+        "status": "OK"
+      },
+      {
+        "batch_size": 4000,
+        "status": "OOM"
+      }
+    ]
+  },
+  "benchmark_summary": {
+    "Reference CPU Double": {
+      "elapsed_total": 51.53098920000048,
+      "sec_per_5000": 17.17699640000016,
+      "blocks_per_sec": 291.0869795606381,
+      "device": "cpu",
+      "precision": "double",
+      "batch_size": 500,
+      "speedup": 1.0
+    },
+    "Optimized CPU Double (16T)": {
+      "elapsed_total": 375.2725682,
+      "sec_per_5000": 125.09085606666667,
+      "blocks_per_sec": 39.970947175669416,
+      "device": "cpu",
+      "precision": "double",
+      "batch_size": 1000,
+      "speedup": 0.13731616314821402
+    },
+    "CUDA Double": {
+      "elapsed_total": 81.74026520000007,
+      "sec_per_5000": 27.24675506666669,
+      "blocks_per_sec": 183.50809069799774,
+      "device": "cuda:0",
+      "precision": "double",
+      "batch_size": 500,
+      "speedup": 0.630423562658082
+    },
+    "CUDA Single": {
+      "elapsed_total": 21.919489399999293,
+      "sec_per_5000": 7.306496466666431,
+      "blocks_per_sec": 684.3225098117698,
+      "device": "cuda:0",
+      "precision": "single",
+      "batch_size": 500,
+      "speedup": 2.3509210574951687
+    }
+  }
+}

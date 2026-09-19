@@ -363,6 +363,99 @@ class TestPhysics(unittest.TestCase):
             self.assertEqual(fwd.h, rev.h)
             self.assertEqual(fwd.snr_db, rev.snr_db)
 
+    def test_15_batch_vs_reference_phy_parity(self):
+        """15. Batch L2 kernel vs scalar PHYEngine reference parity across all 4 modulations."""
+        from sionna.phy.utils import db_to_lin
+
+        num_blocks = 8
+        s_sym = 128
+        engine = PHYEngine(block_symbols=s_sym)
+        master_seed = 20260912
+        test_snrs = [6.0, 14.0, 22.0, 28.0]
+
+        for snr_db in test_snrs:
+            n0_val = float(1.0 / db_to_lin(snr_db, precision="double"))
+            n0_t = torch.tensor(n0_val, dtype=torch.float64)
+            sqrt_n0 = torch.sqrt(n0_t)
+
+            # Generate shared realizations for num_blocks
+            hs_list = []
+            noises_list = []
+            max_m = max(m.bits_per_symbol for m in MODES)
+            payloads_list = []
+
+            for b in range(num_blocks):
+                rng = make_block_rng(master_seed + int(snr_db * 100), block_id=b)
+                h = generate_channel_coefficient(generator=rng.fading_rng)
+                noise = generate_standard_noise(s_sym, generator=rng.noise_rng)
+                payload = torch.randint(0, 2, (s_sym * max_m,), generator=rng.bit_rng, dtype=torch.float64)
+                hs_list.append(h)
+                noises_list.append(noise)
+                payloads_list.append(payload)
+
+            # Batched representations
+            h_batch = torch.stack(hs_list).unsqueeze(-1)  # (B, 1)
+            z_batch = torch.stack(noises_list)            # (B, s_sym)
+            payload_batch = torch.stack(payloads_list)    # (B, s_sym * max_m)
+
+            abs_h_sq = torch.abs(h_batch) ** 2
+            n0_eff = torch.clamp(n0_t / abs_h_sq, min=1e-12)
+            actual_noise_batch = sqrt_n0 * z_batch
+
+            for mode in MODES:
+                m = mode.bits_per_symbol
+                req_bits = s_sym * m
+
+                # --- 1. Batched kernel path ---
+                tx_bits_batch = payload_batch[:, :req_bits]
+                _, mapper, demapper, _ = _get_sionna_modem(m)
+                tx_syms_batch = mapper(tx_bits_batch)
+                y_batch = h_batch * tx_syms_batch + actual_noise_batch
+                y_eq_batch = y_batch / h_batch
+                rx_bits_batch = demapper(y_eq_batch, n0_eff)
+
+                err_mask_batch = (tx_bits_batch != rx_bits_batch).to(torch.int64)
+                bit_errors_batch = err_mask_batch.sum(dim=-1)
+                block_errors_batch = (bit_errors_batch > 0).to(torch.int64)
+
+                # --- 2. Scalar reference path (block-by-block) ---
+                for b in range(num_blocks):
+                    scalar_res = engine.evaluate_mode(
+                        mode=mode,
+                        snr_db=snr_db,
+                        h=hs_list[b],
+                        payload_bits=payloads_list[b][:req_bits],
+                        standard_noise=noises_list[b],
+                    )
+
+                    # Equivalence checks: exact matching of physical results and counts
+                    b_bit_errors = int(bit_errors_batch[b].item())
+                    b_block_error = int(block_errors_batch[b].item())
+
+                    self.assertEqual(
+                        scalar_res.bit_errors, b_bit_errors,
+                        msg=f"Bit errors mismatch for {mode.modulation} at {snr_db} dB, block {b}: "
+                            f"scalar={scalar_res.bit_errors} vs batch={b_bit_errors}"
+                    )
+                    self.assertEqual(
+                        scalar_res.block_error, b_block_error,
+                        msg=f"Block error mismatch for {mode.modulation} at {snr_db} dB, block {b}: "
+                            f"scalar={scalar_res.block_error} vs batch={b_block_error}"
+                    )
+
+                    # Demapped bits exact match via demodulate
+                    scalar_rx_bits = demodulate(
+                        apply_channel(modulate(payloads_list[b][:req_bits], m), snr_db, h=hs_list[b], standard_noise=noises_list[b]).received_symbols,
+                        h=hs_list[b],
+                        bits_per_symbol=m,
+                        n0=n0_t,
+                    )
+                    self.assertTrue(
+                        torch.equal(rx_bits_batch[b], scalar_rx_bits),
+                        msg=f"Demapped bits mismatch for {mode.modulation} at {snr_db} dB, block {b}"
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
+

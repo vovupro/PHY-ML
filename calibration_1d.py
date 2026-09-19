@@ -32,19 +32,34 @@ from phy_engine import (
 from metrics import RawPHYCounters
 
 
+DEFAULT_SNR_GRID: Tuple[float, ...] = (
+    0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+    16.0, 16.5, 17.0, 17.5, 18.0, 20.0,
+    22.0, 22.5, 23.0, 23.5, 24.0, 26.0,
+    28.0, 28.5, 29.0, 29.5, 30.0,
+)
+
+CANONICAL_SNR_INDICES: Dict[float, int] = {
+    0.0: 0, 2.0: 1, 4.0: 2, 6.0: 3, 8.0: 4, 10.0: 5, 12.0: 6, 14.0: 7,
+    16.0: 8, 18.0: 9, 20.0: 10, 22.0: 11, 24.0: 12, 26.0: 13, 28.0: 14, 30.0: 15,
+    # 9 refinement points for transition zones
+    16.5: 100, 17.0: 101, 17.5: 102,
+    22.5: 103, 23.0: 104, 23.5: 105,
+    28.5: 106, 29.0: 107, 29.5: 108,
+}
+
+
 @dataclass(frozen=True)
 class Calibration1DConfig:
     """Configuration parameters for 1D Monte Carlo calibration."""
-    snr_grid: Tuple[float, ...] = (
-        0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
-        16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0
-    )
+    snr_grid: Tuple[float, ...] = DEFAULT_SNR_GRID
     num_blocks: int = 5000
     batch_blocks: int = 500
     symbols_per_block: int = 1536
     master_seed: int = 20260918
     channel_type: str = "rayleigh"
     modes: Tuple[ModulationMode, ...] = MODES
+    num_threads: Optional[int] = 12
 
 
 @dataclass(frozen=True)
@@ -97,7 +112,7 @@ def run_1d_calibration(
     Parameters
     ----------
     config : Calibration1DConfig, optional
-        Calibration configuration. Uses default 5000 blocks and [0, 30] dB grid if None.
+        Calibration configuration. Uses default 5000 blocks and refined [0, 30] dB grid if None.
     progress_callback : callable, optional
         Optional callback func(snr_db, current_step, total_steps).
 
@@ -109,6 +124,9 @@ def run_1d_calibration(
     if config is None:
         config = Calibration1DConfig()
 
+    if config.num_threads is not None and config.num_threads > 0:
+        torch.set_num_threads(config.num_threads)
+
     records: List[CalibrationRecord] = []
     max_m = max(m.bits_per_symbol for m in config.modes)
     s_sym = config.symbols_per_block
@@ -116,9 +134,12 @@ def run_1d_calibration(
 
     gfc = _get_flat_fading_model()
 
-    for snr_idx, snr_db in enumerate(config.snr_grid):
+    for loop_idx, snr_db in enumerate(config.snr_grid):
         if progress_callback is not None:
-            progress_callback(float(snr_db), snr_idx + 1, total_points)
+            progress_callback(float(snr_db), loop_idx + 1, total_points)
+
+        snr_key = round(float(snr_db), 2)
+        snr_idx = CANONICAL_SNR_INDICES.get(snr_key, loop_idx)
 
         n0_val = float(1.0 / db_to_lin(snr_db, precision="double"))
         n0_t = torch.tensor(n0_val, dtype=torch.float64)
@@ -246,6 +267,36 @@ def save_calibration_csv(records: List[CalibrationRecord], output_path: Union[st
     return path
 
 
+def load_calibration_csv_records(csv_path: Union[str, Path]) -> List[CalibrationRecord]:
+    """Load calibration records from CSV."""
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Calibration table not found at: {path}")
+
+    records: List[CalibrationRecord] = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            records.append(
+                CalibrationRecord(
+                    mode_id=int(row["mode_id"]),
+                    modulation=str(row["modulation"]).strip(),
+                    bits_per_symbol=int(row["bits_per_symbol"]),
+                    snr_db=float(row["snr_db"]),
+                    num_blocks=int(row["num_blocks"]),
+                    total_bits=int(row["total_bits"]),
+                    bit_errors=int(row["bit_errors"]),
+                    ber=float(row["ber"]),
+                    block_errors=int(row["block_errors"]),
+                    bler=float(row["bler"]),
+                    mean_block_ber=float(row["mean_block_ber"]),
+                    std_block_ber=float(row["std_block_ber"]),
+                    se_block_ber=float(row["se_block_ber"]),
+                )
+            )
+    return records
+
+
 def theoretical_bpsk_rayleigh(snr_db: float) -> float:
     """Independent theoretical analytical BER for BPSK under slow Rayleigh fading.
 
@@ -267,7 +318,8 @@ def generate_verification_report(
     """Generate a rigorous PHY Calibration Verification Report formatted for a telecom thesis.
 
     Uses statistical confidence metrics (block standard error and z-scores) rather than fixed
-    absolute thresholds to assess agreement with independent analytical theory and independent seeds.
+    absolute thresholds to assess agreement with independent analytical theory and independent seeds
+    across all candidate modulation modes (BPSK, QPSK, 16QAM, 64QAM).
     """
     snrs = sorted(list(set(r.snr_db for r in records)))
     modes = config.modes
@@ -359,7 +411,7 @@ def generate_verification_report(
         "",
         "## 2. Calibration Setup Parameters",
         "",
-        f"- **SNR Operating Grid:** {len(snrs)} points from {min(snrs):.1f} dB to {max(snrs):.1f} dB (step 2.0 dB)",
+        f"- **SNR Operating Grid:** {len(snrs)} points from {min(snrs):.1f} dB to {max(snrs):.1f} dB (0.5 dB resolution in transition regions: 16-18 dB, 22-24 dB, 28-30 dB)",
         f"- **Monte Carlo Blocks per SNR:** {config.num_blocks:,} independent fading blocks",
         f"- **Symbols per Block:** {config.symbols_per_block:,} symbols",
         f"- **Total Channel Realizations:** {len(snrs) * config.num_blocks:,} independent fading blocks",
@@ -389,36 +441,98 @@ def generate_verification_report(
             f"{c['se']:8.5f} | {c['z']:7.2f} | {c['bit_errors']:10d} | {c['status']:25s} |"
         )
 
-    # Optional Seed A vs Seed B Comparison section
+    # 4. Independent Seed Convergence Check (Seed A vs. Seed B across ALL 4 MODES)
     if records_seed_b is not None:
         lines.extend([
             "",
             "---",
             "",
-            "## 4. Independent Seed Convergence Check (Seed A vs. Seed B for BPSK)",
+            "## 4. Independent Seed Convergence Verification (Seed A vs. Seed B across All 4 Modulations)",
             "",
-            "Verifies that independent Monte Carlo batches converge toward the same physical result.",
+            "Verifies that independent Monte Carlo batches converge toward the same physical result across all candidate modes.",
+            "Test statistic: Combined Standard Error $SE_{comb} = \\sqrt{SE_A^2 + SE_B^2}$, $z_{AB} = \\frac{|BER_A - BER_B|}{SE_{comb}}$.",
+            "Acceptance criterion: $z_{AB} \\le 3.0$ (99.7% confidence boundary). Points with $z_{AB} > 3.0$ are flagged as anomalous divergence.",
             "",
-            "| SNR (dB) | BER (Seed A) | SE (Seed A) | BER (Seed B) | SE (Seed B) | Theory | Abs Diff A-B | Combined z | Status |",
-            "|:--------:|:------------:|:-----------:|:------------:|:-----------:|:------:|:------------:|:----------:|:------:|",
         ])
 
-        for snr in snrs:
-            ra = data.get(("BPSK", snr))
-            rb = data_b.get(("BPSK", snr))
-            if ra is not None and rb is not None:
-                diff_ab = abs(ra.ber - rb.ber)
-                comb_se = (ra.se_block_ber**2 + rb.se_block_ber**2)**0.5
-                z_ab = diff_ab / comb_se if comb_se > 1e-12 else 0.0
-                theory = theoretical_bpsk_rayleigh(snr)
-                stat_ab = "CONVERGED" if z_ab <= 3.0 else "UNRESOLVED_DIFF"
-                lines.append(
-                    f"| {snr:8.1f} | {ra.ber:12.5f} | {ra.se_block_ber:11.5f} | {rb.ber:12.5f} | "
-                    f"{rb.se_block_ber:11.5f} | {theory:6.4f} | {diff_ab:12.5f} | {z_ab:10.2f} | {stat_ab:9s} |"
-                )
+        total_checks = 0
+        flagged_checks = 0
+        max_z_overall = 0.0
+        sum_z_overall = 0.0
+
+        mode_stats = {}
+        for m in modes:
+            m_checks = 0
+            m_max_z = 0.0
+            m_sum_z = 0.0
+            m_flagged = 0
+            for snr in snrs:
+                ra = data.get((m.modulation, snr))
+                rb = data_b.get((m.modulation, snr))
+                if ra is not None and rb is not None:
+                    diff_ab = abs(ra.ber - rb.ber)
+                    comb_se = (ra.se_block_ber**2 + rb.se_block_ber**2)**0.5
+                    z_ab = diff_ab / comb_se if comb_se > 1e-12 else 0.0
+                    m_checks += 1
+                    m_sum_z += z_ab
+                    if z_ab > m_max_z:
+                        m_max_z = z_ab
+                    if z_ab > 3.0:
+                        m_flagged += 1
+            mode_stats[m.modulation] = {
+                "checks": m_checks,
+                "mean_z": (m_sum_z / m_checks) if m_checks > 0 else 0.0,
+                "max_z": m_max_z,
+                "flagged": m_flagged,
+            }
+            total_checks += m_checks
+            sum_z_overall += m_sum_z
+            if m_max_z > max_z_overall:
+                max_z_overall = m_max_z
+            flagged_checks += m_flagged
+
+        mean_z_overall = (sum_z_overall / total_checks) if total_checks > 0 else 0.0
+
+        lines.extend([
+            "### Convergence Summary across All Modulations:",
+            "",
+            "| Modulation | Checked Points | Mean z-score | Max z-score | Flagged Points (z > 3.0) | Gate Status |",
+            "|:----------:|:--------------:|:------------:|:-----------:|:-------------------------:|:-----------:|",
+        ])
+        for m in modes:
+            ms = mode_stats[m.modulation]
+            stat_str = "PASS (CONVERGED)" if ms["flagged"] == 0 else f"FAIL ({ms['flagged']} FLAGGED)"
+            lines.append(
+                f"| {m.modulation:10s} | {ms['checks']:14d} | {ms['mean_z']:12.2f} | {ms['max_z']:11.2f} | {ms['flagged']:25d} | {stat_str:11s} |"
+            )
+        lines.append(
+            f"| **OVERALL**  | **{total_checks:12d}** | **{mean_z_overall:10.2f}** | **{max_z_overall:9.2f}** | **{flagged_checks:23d}** | **{'PASS' if flagged_checks == 0 else 'FAIL'}** |"
+        )
+        lines.append("")
+
+        # Detailed per-mode tables
+        for m in modes:
+            lines.extend([
+                f"### {m.modulation} Convergence Table:",
+                "",
+                "| SNR (dB) | BER (Seed A) | SE (Seed A) | BER (Seed B) | SE (Seed B) | Abs Diff A-B | Combined SE | z_AB | Status |",
+                "|:--------:|:------------:|:-----------:|:------------:|:-----------:|:------------:|:-----------:|:----:|:------:|",
+            ])
+            for snr in snrs:
+                ra = data.get((m.modulation, snr))
+                rb = data_b.get((m.modulation, snr))
+                if ra is not None and rb is not None:
+                    diff_ab = abs(ra.ber - rb.ber)
+                    comb_se = (ra.se_block_ber**2 + rb.se_block_ber**2)**0.5
+                    z_ab = diff_ab / comb_se if comb_se > 1e-12 else 0.0
+                    stat_ab = "CONVERGED" if z_ab <= 3.0 else "FLAGGED (z > 3.0)"
+                    lines.append(
+                        f"| {snr:8.1f} | {ra.ber:12.5f} | {ra.se_block_ber:11.5f} | {rb.ber:12.5f} | "
+                        f"{rb.se_block_ber:11.5f} | {diff_ab:12.5f} | {comb_se:11.5f} | {z_ab:4.2f} | {stat_ab:9s} |"
+                    )
+            lines.append("")
 
     lines.extend([
-        "",
         "---",
         "",
         "## 5. Raw Calibration Table Summary (Primary Dataset - Seed A)",
@@ -465,7 +579,7 @@ def generate_verification_report(
         lines.append("### Quality Check:")
         lines.append("- No statistically anomalous reversals detected across the grid.")
         lines.append("- BER and BLER degrade monotonically with higher modulation orders at identical SNR, in accordance with physical theory.")
-        lines.append("- Independent Monte Carlo seeds demonstrate statistical convergence across the entire operating range.")
+        lines.append("- Independent Monte Carlo seeds demonstrate statistical convergence across all 4 candidate modulations.")
 
     report_content = "\n".join(lines) + "\n"
 
@@ -478,54 +592,79 @@ def generate_verification_report(
 
 
 if __name__ == "__main__":
-    print("=== PHY-ML: L2 1D Monte Carlo Calibration (5,000 Blocks / SNR) ===")
-    config_a = Calibration1DConfig(
-        snr_grid=(
-            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
-            16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0
-        ),
-        num_blocks=5000,
-        batch_blocks=500,
-        symbols_per_block=1536,
-        master_seed=20260918,
-    )
-
-    config_b = Calibration1DConfig(
-        snr_grid=config_a.snr_grid,
-        num_blocks=config_a.num_blocks,
-        batch_blocks=config_a.batch_blocks,
-        symbols_per_block=config_a.symbols_per_block,
-        master_seed=20260919,
-    )
-
-    def print_progress_a(snr_db: float, step: int, total: int):
-        print(f"[Seed A: {step:2d}/{total:2d}] Running SNR = {snr_db:4.1f} dB ({config_a.num_blocks:,} blocks)...", flush=True)
-
-    def print_progress_b(snr_db: float, step: int, total: int):
-        print(f"[Seed B: {step:2d}/{total:2d}] Running SNR = {snr_db:4.1f} dB ({config_b.num_blocks:,} blocks)...", flush=True)
-
-    print("\n--- Running Primary Calibration (Seed A = 20260918) ---", flush=True)
-    records_a = run_1d_calibration(config_a, progress_callback=print_progress_a)
+    print("=== PHY-ML: L2 1D Monte Carlo Calibration (25 SNR Points, 5,000 Blocks / SNR) ===")
     csv_a_path = Path("results/calibration_1d_rayleigh.csv")
-    save_calibration_csv(records_a, csv_a_path)
-    print(f"Seed A raw data saved to: {csv_a_path}", flush=True)
-
-    print("\n--- Running Independent Verification Calibration (Seed B = 20260919) ---", flush=True)
-    records_b = run_1d_calibration(config_b, progress_callback=print_progress_b)
     csv_b_path = Path("results/calibration_1d_seed_b.csv")
-    save_calibration_csv(records_b, csv_b_path)
-    print(f"Seed B raw data saved to: {csv_b_path}", flush=True)
+
+    existing_a: Dict[Tuple[str, float], CalibrationRecord] = {}
+    if csv_a_path.exists():
+        for r in load_calibration_csv_records(csv_a_path):
+            existing_a[(r.modulation, round(r.snr_db, 2))] = r
+
+    existing_b: Dict[Tuple[str, float], CalibrationRecord] = {}
+    if csv_b_path.exists():
+        for r in load_calibration_csv_records(csv_b_path):
+            existing_b[(r.modulation, round(r.snr_db, 2))] = r
+
+    # Determine missing SNRs for Seed A
+    needed_snrs = DEFAULT_SNR_GRID
+    missing_snrs_a = [s for s in needed_snrs if any(("BPSK", round(s, 2)) not in existing_a for m in MODES)]
+    missing_snrs_b = [s for s in needed_snrs if any(("BPSK", round(s, 2)) not in existing_b for m in MODES)]
+
+    print(f"Total grid points required: {len(needed_snrs)}")
+    print(f"Seed A already cached: {len(existing_a)//4} points, missing: {len(missing_snrs_a)} points")
+    print(f"Seed B already cached: {len(existing_b)//4} points, missing: {len(missing_snrs_b)} points")
+
+    records_a_all = list(existing_a.values())
+    if missing_snrs_a:
+        print(f"\n--- Running Seed A for missing points: {missing_snrs_a} ---", flush=True)
+        config_a = Calibration1DConfig(
+            snr_grid=tuple(missing_snrs_a),
+            num_blocks=5000,
+            batch_blocks=500,
+            symbols_per_block=1536,
+            master_seed=20260918,
+            num_threads=12,
+        )
+        def print_progress_a(snr_db: float, step: int, total: int):
+            print(f"[Seed A: {step:2d}/{total:2d}] Running SNR = {snr_db:4.1f} dB ({config_a.num_blocks:,} blocks)...", flush=True)
+
+        new_a = run_1d_calibration(config_a, progress_callback=print_progress_a)
+        records_a_all.extend(new_a)
+
+    records_b_all = list(existing_b.values())
+    if missing_snrs_b:
+        print(f"\n--- Running Seed B for missing points: {missing_snrs_b} ---", flush=True)
+        config_b = Calibration1DConfig(
+            snr_grid=tuple(missing_snrs_b),
+            num_blocks=5000,
+            batch_blocks=500,
+            symbols_per_block=1536,
+            master_seed=20260919,
+            num_threads=12,
+        )
+        def print_progress_b(snr_db: float, step: int, total: int):
+            print(f"[Seed B: {step:2d}/{total:2d}] Running SNR = {snr_db:4.1f} dB ({config_b.num_blocks:,} blocks)...", flush=True)
+
+        new_b = run_1d_calibration(config_b, progress_callback=print_progress_b)
+        records_b_all.extend(new_b)
+
+    # Sort records by (snr_db, mode_id)
+    records_a_all = sorted(records_a_all, key=lambda r: (r.snr_db, r.mode_id))
+    records_b_all = sorted(records_b_all, key=lambda r: (r.snr_db, r.mode_id))
+
+    save_calibration_csv(records_a_all, csv_a_path)
+    print(f"Seed A saved to: {csv_a_path} ({len(records_a_all)} records)")
+
+    save_calibration_csv(records_b_all, csv_b_path)
+    print(f"Seed B saved to: {csv_b_path} ({len(records_b_all)} records)")
 
     report_path = Path("results/calibration_1d_report.md")
     report_text = generate_verification_report(
-        records=records_a,
-        config=config_a,
-        records_seed_b=records_b,
-        seed_b_val=config_b.master_seed,
+        records=records_a_all,
+        config=Calibration1DConfig(snr_grid=DEFAULT_SNR_GRID, num_blocks=5000, master_seed=20260918),
+        records_seed_b=records_b_all,
+        seed_b_val=20260919,
         output_path=report_path,
     )
     print(f"\nVerification report saved to: {report_path}")
-
-    print("\n--- Report Preview (Analytical Validation Section) ---")
-    preview_lines = report_text.splitlines()[:65]
-    print("\n".join(preview_lines))

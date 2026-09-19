@@ -1,0 +1,5 @@
+interval_id,min_snr_db,max_snr_db,mode,bits_per_symbol
+0,-inf,16.75,BPSK,1
+1,16.75,22.75,QPSK,2
+2,22.75,28.25,16QAM,4
+3,28.25,inf,64QAM,6

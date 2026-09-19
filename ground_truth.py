@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
+from metrics import BER_TARGET, CONFIDENCE_K, is_reliability_uncertain
+
 
 MODULATION_BPS: Dict[str, int] = {
     "BPSK": 1,
@@ -37,9 +39,9 @@ MODULATION_BPS: Dict[str, int] = {
 @dataclass(frozen=True)
 class GroundTruthConfig:
     """Explicit configuration for Ground Truth BestMode decision rule."""
-    ber_target: float = 0.01  # 1% target uncoded BER (configurable research parameter)
+    ber_target: float = BER_TARGET  # 1% target uncoded BER (configurable research parameter)
     fallback_policy: str = "robustest_mode"  # Fallback if no mode satisfies reliability constraint
-    confidence_k: float = 1.96  # Standard error multiplier for boundary ambiguity detection
+    confidence_k: float = CONFIDENCE_K  # Standard error multiplier for boundary ambiguity detection
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ class GroundTruthRow:
     reliability_uncertain: bool
     label_uncertain: bool
     boundary_uncertain: bool
+    num_blocks: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -88,6 +91,7 @@ class GroundTruthRow:
             "reliability_uncertain": self.reliability_uncertain,
             "label_uncertain": self.label_uncertain,
             "boundary_uncertain": self.boundary_uncertain,
+            "num_blocks": self.num_blocks,
         }
 
 
@@ -107,10 +111,11 @@ def load_calibration_csv(csv_path: Union[str, Path]) -> Dict[float, Dict[str, Di
                 data[snr] = {}
             data[snr][mod] = {
                 "ber": float(row["ber"]),
-                "bler": float(row["bler"]),
+                "bler": float(row.get("bler", 0.0)),
                 "se": float(row.get("se_block_ber", 0.0)),
-                "bit_errors": float(row["bit_errors"]),
-                "total_bits": float(row["total_bits"]),
+                "bit_errors": float(row.get("bit_errors", 0.0)),
+                "total_bits": float(row.get("total_bits", 0.0)),
+                "num_blocks": int(float(row.get("num_blocks", 0))),
             }
     return data
 
@@ -126,7 +131,7 @@ def compute_ground_truth(
         2. Among eligible modes, select the mode with highest bits_per_symbol.
         3. If no mode passes, invoke fallback_policy (robustest_mode -> BPSK).
         4. Detect formal uncertainty:
-           - reliability_uncertain: whether ANY mode has confidence interval overlapping ber_target.
+           - reliability_uncertain: whether ANY mode has 95% confidence interval overlapping ber_target.
            - label_uncertain: whether confidence interval variance can alter BestMode selection.
            - boundary_uncertain: alias to label_uncertain for backward compatibility.
     """
@@ -142,6 +147,7 @@ def compute_ground_truth(
 
         ber_dict = {m: snr_dict.get(m, {}).get("ber", 1.0) for m in modes_in_order}
         se_dict = {m: snr_dict.get(m, {}).get("se", 0.0) for m in modes_in_order}
+        snr_blocks = max((int(snr_dict.get(m, {}).get("num_blocks", 0)) for m in modes_in_order), default=0)
 
         # Step 1: Check eligibility against reliability constraint at point estimate
         eligible = {m: ber_dict[m] <= config.ber_target for m in modes_in_order}
@@ -166,24 +172,23 @@ def compute_ground_truth(
         # Step 4: Formal Uncertainty Semantics
         k = config.confidence_k
 
-        # 4a. Reliability uncertainty: Does ANY candidate mode's confidence interval overlap ber_target?
-        reliability_uncertain = False
-        for m in modes_in_order:
-            se_m = se_dict[m]
-            if se_m > 1e-12 and abs(ber_dict[m] - config.ber_target) <= k * se_m:
-                reliability_uncertain = True
-                break
+        # 4a. Reliability uncertainty: Does ANY candidate mode's 95% confidence interval overlap ber_target?
+        reliability_uncertain = any(
+            is_reliability_uncertain(ber_dict[m], se_dict[m], target=config.ber_target, k=k)
+            for m in modes_in_order
+            if se_dict[m] > 1e-12
+        )
 
         # 4b. Label uncertainty: Can confidence interval variance alter BestMode selection?
-        # Optimistic scenario: Each mode receives its lower CI bound (BER - k*SE)
+        # Optimistic scenario: Each mode receives its lower CI bound max(0.0, BER - k*SE)
         optimistic_passed = [
             m for m in modes_in_order
-            if (ber_dict[m] - k * se_dict[m]) <= config.ber_target
+            if max(0.0, ber_dict[m] - k * se_dict[m]) <= config.ber_target
         ]
         if optimistic_passed:
             best_m_opt = max(optimistic_passed, key=lambda m: MODULATION_BPS[m])
         else:
-            best_m_opt = "BPSK" if config.fallback_policy == "robustest_mode" else min(modes_in_order, key=lambda m: ber_dict[m] - k * se_dict[m])
+            best_m_opt = "BPSK" if config.fallback_policy == "robustest_mode" else min(modes_in_order, key=lambda m: max(0.0, ber_dict[m] - k * se_dict[m]))
 
         # Pessimistic scenario: Each mode receives its upper CI bound (BER + k*SE)
         pessimistic_passed = [
@@ -220,6 +225,7 @@ def compute_ground_truth(
                 reliability_uncertain=reliability_uncertain,
                 label_uncertain=label_uncertain,
                 boundary_uncertain=boundary_uncertain,
+                num_blocks=snr_blocks,
             )
         )
 
@@ -237,7 +243,8 @@ def save_ground_truth_csv(rows: List[GroundTruthRow], output_path: Union[str, Pa
         "BPSK_SE", "QPSK_SE", "16QAM_SE", "64QAM_SE",
         "BPSK_eligible", "QPSK_eligible", "16QAM_eligible", "64QAM_eligible",
         "best_mode", "best_mode_bps", "fallback_used", "selection_reason",
-        "reliability_uncertain", "label_uncertain", "boundary_uncertain"
+        "reliability_uncertain", "label_uncertain", "boundary_uncertain",
+        "num_blocks",
     ]
 
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -362,13 +369,39 @@ class LookupTable1D:
 # L3 Telecom Verification Report Generator
 # =====================================================================
 
+def save_lut_csv(lut: LookupTable1D, output_path: Union[str, Path]) -> Path:
+    """Save 1D Lookup Table intervals and switching thresholds to CSV."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["interval_id", "min_snr_db", "max_snr_db", "mode", "bits_per_symbol"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for idx, inv in enumerate(lut.intervals):
+            min_str = f"{inv.min_snr:.2f}" if inv.min_snr != -float("inf") else "-inf"
+            max_str = f"{inv.max_snr:.2f}" if inv.max_snr != float("inf") else "inf"
+            writer.writerow({
+                "interval_id": idx,
+                "min_snr_db": min_str,
+                "max_snr_db": max_str,
+                "mode": inv.mode,
+                "bits_per_symbol": inv.bits_per_symbol,
+            })
+    return path
+
+
+# =====================================================================
+# L3 Telecom Verification Report Generator
+# =====================================================================
+
 def generate_l3_report(
     rows: List[GroundTruthRow],
     lut: LookupTable1D,
     config: GroundTruthConfig,
-    num_blocks: int,
-    symbols_per_block: int,
+    symbols_per_block: int = 1536,
     output_path: Optional[Union[str, Path]] = None,
+    source_dataset: str = "results/l2_cuda_rtx3060_final/calibration_1d_cuda_pooled.csv",
+    num_blocks: Optional[int] = None,
 ) -> str:
     """Generate a comprehensive L3 Ground Truth & Adaptation Report for a telecom thesis."""
     snrs = [r.snr_db for r in rows]
@@ -378,12 +411,32 @@ def generate_l3_report(
     rel_unc_rows = [r for r in rows if r.reliability_uncertain]
     lbl_unc_rows = [r for r in rows if r.label_uncertain]
 
+    total_blocks = sum(r.num_blocks for r in rows)
+    min_blocks = min((r.num_blocks for r in rows if r.num_blocks > 0), default=0)
+    max_blocks = max((r.num_blocks for r in rows), default=0)
+
+    if total_blocks > 0:
+        sim_depth_str = (
+            f"Adaptive dual-seed Monte Carlo calibration ranging from {min_blocks:,} to {max_blocks:,} "
+            f"independent fading blocks per operating point ({min_blocks * symbols_per_block:,} to "
+            f"{max_blocks * symbols_per_block:,} symbols/point), totaling {total_blocks:,} blocks "
+            f"({total_blocks * symbols_per_block:,} symbols) across all {len(snrs)} SNR operating points."
+        )
+    elif num_blocks is not None and num_blocks > 0:
+        sim_depth_str = (
+            f"{num_blocks:,} independent fading blocks ({num_blocks * symbols_per_block:,} symbols) "
+            f"per operating point across {len(snrs)} points."
+        )
+    else:
+        sim_depth_str = f"Calibration dataset evaluated across {len(snrs)} operating points ({symbols_per_block:,} symbols/block)."
+
     lines = [
         "# PHY-AMC Ground Truth & Link Adaptation Baseline Report",
         "",
         "**Topic:** 1D Ground Truth BestMode Synthesis and Baseline Adaptation under Slow Rayleigh Block Fading  ",
         "**Layer:** L3 (Link Adaptation Ground Truth & Baseline Policies)  ",
-        f"**Date:** 2026-09-18  ",
+        "**Date:** 2026-09-19  ",
+        f"**Source Calibration Data:** `{source_dataset}`  ",
         "",
         "---",
         "",
@@ -391,7 +444,7 @@ def generate_l3_report(
         "",
         "- **Channel & Noise Model:** Single-carrier transmission over slow Rayleigh flat block fading ($y = h \\cdot x + n$). Channel scalar $h \\sim \\mathcal{CN}(0, 1)$ held constant over $N_s = 1,536$ symbols. Noise $n \\sim \\mathcal{CN}(0, N_0)$ with setup $SNR_{setup} = E_s / N_0$ ($E_s = 1.0$).",
         "- **Fading Averaging:** Fading is averaged across independent Monte Carlo transmission blocks at each nominal SNR.",
-        f"- **Simulation Depth:** {num_blocks:,} independent fading blocks ({num_blocks * symbols_per_block:,} symbols) per operating point.",
+        f"- **Simulation Depth:** {sim_depth_str}",
         f"- **Target Reliability Constraint:** $\\text{{BER}} \\le {config.ber_target:.4f}$ ({config.ber_target * 100:.2f}%)",
         f"- **Fallback Rule:** `{config.fallback_policy}` (BPSK is selected if no modulation meets the target BER).",
         f"- **Operating Grid:** {len(snrs)} points from {min_snr:.1f} dB to {max_snr:.1f} dB (locally refined to 0.5 dB resolution at 16-18 dB, 22-24 dB, and 28-30 dB).",
@@ -400,25 +453,27 @@ def generate_l3_report(
         "",
         "## 2. Ground Truth BestMode Table",
         "",
-        "| SNR (dB) | BPSK BER (SE) | QPSK BER (SE) | 16-QAM BER (SE) | 64-QAM BER (SE) | BestMode | Rate (bpcu) | Fallback | Reliability Unc. | Label Unc. |",
-        "|:--------:|:-------------:|:-------------:|:---------------:|:---------------:|:--------:|:-----------:|:--------:|:----------------:|:----------:|",
+        "| SNR (dB) | BPSK BER (SE) | QPSK BER (SE) | 16-QAM BER (SE) | 64-QAM BER (SE) | BestMode | Rate (bpcu) | Fallback | Reliability Unc. | Label Unc. | Blocks |",
+        "|:--------:|:-------------:|:-------------:|:---------------:|:---------------:|:--------:|:-----------:|:--------:|:----------------:|:----------:|:------:|",
     ]
 
     for r in rows:
         fb_str = "YES" if r.fallback_used else "No"
         rel_str = "FLAGGED" if r.reliability_uncertain else "Clear"
         lbl_str = "FLAGGED" if r.label_uncertain else "Clear"
+        blks_str = f"{r.num_blocks:6,d}" if r.num_blocks > 0 else "   N/A"
         lines.append(
             f"| {r.snr_db:8.1f} | "
-            f"{r.bpsk_ber:7.5f} ({r.bpsk_se:6.4f}) | "
-            f"{r.qpsk_ber:7.5f} ({r.qpsk_se:6.4f}) | "
-            f"{r.qam16_ber:8.5f} ({r.qam16_se:6.4f}) | "
-            f"{r.qam64_ber:8.5f} ({r.qam64_se:6.4f}) | "
+            f"{r.bpsk_ber:10.5e} ({r.bpsk_se:8.2e}) | "
+            f"{r.qpsk_ber:10.5e} ({r.qpsk_se:8.2e}) | "
+            f"{r.qam16_ber:10.5e} ({r.qam16_se:8.2e}) | "
+            f"{r.qam64_ber:10.5e} ({r.qam64_se:8.2e}) | "
             f"{r.best_mode:8s} | "
             f"{r.best_mode_bps:11d} | "
             f"{fb_str:8s} | "
             f"{rel_str:16s} | "
-            f"{lbl_str:10s} |"
+            f"{lbl_str:10s} | "
+            f"{blks_str} |"
         )
 
     lines.extend([
@@ -427,7 +482,8 @@ def generate_l3_report(
         "",
         "## 3. Link Adaptation Switching Regions & LUT Thresholds",
         "",
-        "The 1D Look-Up Table (LUT) defines **LUT switching threshold derived from the sampled calibration grid** at the midpoints between adjacent sampled SNRs where the selected modulation transitions.",
+        "The 1D Look-Up Table (LUT) defines **sampled-grid-derived switching thresholds** at the midpoints between adjacent sampled SNRs where the selected modulation transitions.",
+        "These thresholds reflect the midpoints of the discrete empirical calibration grid and are not claimed to be exact continuous physical BER-crossing thresholds.",
         "Calibration grid resolution is 0.5 dB in all active transition zones (16-18 dB, 22-24 dB, 28-30 dB).",
         "",
         "### Derived Switching Thresholds:",
@@ -457,30 +513,30 @@ def generate_l3_report(
         "",
         "We distinguish two levels of uncertainty:",
         "1. **Reliability Uncertainty (`reliability_uncertain`):** A candidate mode's empirical 95% confidence interval ($[BER - 1.96 \\cdot SE, BER + 1.96 \\cdot SE]$) overlaps $BER_{target} = 0.01$.",
-        "2. **Label Uncertainty (`label_uncertain`):** Confidence interval variance is sufficient to alter the selected $BestMode$ (i.e. $BestMode_{optimistic} \\ne BestMode_{pessimistic}$).",
+        "2. **Label Uncertainty (`label_uncertain`):** Confidence interval variance is sufficient to alter the selected $BestMode$ under optimistic vs. pessimistic bound evaluations (i.e. $BestMode_{optimistic} \\ne BestMode_{pessimistic}$).",
         "",
     ])
 
     if rel_unc_rows:
         lines.append(f"### Reliability Uncertainty ({len(rel_unc_rows)} points):")
         for ur in rel_unc_rows:
-            lines.append(f"- **SNR = {ur.snr_db:.1f} dB**: Marginal mode CI overlaps $BER = {config.ber_target}$. (BestMode: **{ur.best_mode}**)")
+            lines.append(f"- **SNR = {ur.snr_db:.1f} dB**: Empirical 95% CI of a candidate modulation overlaps $BER_{{target}} = {config.ber_target:.4f}$. (Selected BestMode: **{ur.best_mode}**)")
 
     lines.append("")
     if lbl_unc_rows:
         lines.append(f"### Label Uncertainty ({len(lbl_unc_rows)} points):")
         for ur in lbl_unc_rows:
-            lines.append(f"- **SNR = {ur.snr_db:.1f} dB**: BestMode selection is sensitive to statistical variance between candidate modes.")
+            lines.append(f"- **SNR = {ur.snr_db:.1f} dB**: BestMode selection is sensitive to statistical confidence intervals between candidate modes.")
     else:
         lines.append("### Label Uncertainty: None detected.")
 
     lines.extend([
         "",
-        "### Special Thesis Finding & Physical Limitation (28.0 dB Operating Point):",
-        "- **Empirical Observation:** At 28.0 dB with 5,000 blocks, Seed A yields 64-QAM $BER = 0.01063 \\pm 0.00054$ and Seed B yields $0.01024 \\pm 0.00052$. Since both exceed 0.0100, 16-QAM is selected as the compliant mode. However, the lower 95% CI bound enters the compliant region, causing `label_uncertain = True`.",
-        "- **Analytical Rayleigh Grounding:** Exact numerical integration of uncoded 64-QAM over Rayleigh fading yields theoretical $BER_{theo}(28.0\\text{ dB}) = 0.010121$. The true physical Rayleigh curve lies just $\\Delta = 0.00012$ above the target.",
-        "- **Supplementary High-Depth Scans:** Scans up to 50,000 blocks confirmed the empirical BER fluctuates around $0.00993 \\pm 0.00031$, maintaining CI overlap with 0.0100.",
-        "- **Thesis Conclusion & Boundary Protocol:** Resolving $\\Delta = 0.00012$ with $3\\sigma$ confidence requires over 6 million Monte Carlo blocks, an impractical computational cost for an infinitesimal performance margin. Per thesis research protocol, the primary 5k-point dataset is preserved with 16-QAM selected, and this statistical ambiguity is explicitly documented as a fundamental limitation of discrete empirical sampling near continuous channel capacity boundaries.",
+        "### Factual Empirical Observations at Boundary Points:",
+        "- **14.0 dB (`reliability_uncertain = True`, `label_uncertain = False`):** BPSK empirical BER is $9.577 \\times 10^{-3}$ with 95% CI $[9.123 \\times 10^{-3}, 1.003 \\times 10^{-2}]$, overlapping $BER_{target} = 0.0100$. However, because BPSK is also the fallback mode if no mode qualifies, BestMode remains BPSK under both optimistic and pessimistic bounds, leaving the label robustly invariant.",
+        "- **23.0 dB (`reliability_uncertain = True`, `label_uncertain = True`):** 16-QAM empirical BER is $9.714 \\times 10^{-3}$ with 95% CI $[9.427 \\times 10^{-3}, 1.0001 \\times 10^{-2}]$. At point estimate, 16-QAM meets the reliability constraint and is selected (4 bpcu). Under the pessimistic CI bound, 16-QAM BER marginally exceeds 0.0100, which would disqualify 16-QAM in favor of QPSK (2 bpcu).",
+        "- **28.0 dB (`reliability_uncertain = True`, `label_uncertain = True`):** 64-QAM empirical BER is $1.0095 \\times 10^{-2}$ with 95% CI $[9.827 \\times 10^{-3}, 1.036 \\times 10^{-2}]$. At point estimate, 64-QAM slightly exceeds $BER_{target} = 0.0100$, so 16-QAM is selected as the highest eligible mode (4 bpcu). Under the optimistic CI bound, 64-QAM drops below 0.0100 and would be selected (6 bpcu).",
+        "- **Unambiguous Operating Points (22 points):** All other 22 SNR points exhibit non-overlapping confidence intervals relative to $BER_{target} = 0.0100$, yielding identical BestMode selections across nominal, optimistic, and pessimistic evaluations.",
     ])
 
     lines.append("")
@@ -498,7 +554,7 @@ def generate_l3_report(
             lines.append(f"- Warning: At {th:.1f} dB, transition from {p_m} to lower-rate {n_m}!")
     else:
         lines.append("### Quality Verification:")
-        lines.append("- Non-decreasing selected spectral efficiency with SNR is strictly verified across the entire 25-point grid.")
+        lines.append("- Non-decreasing selected spectral efficiency with SNR is strictly verified across the entire 25-point grid (Monotonicity: PASS).")
         lines.append("- LUT thresholds form well-defined, non-overlapping switching intervals derived from the sampled calibration grid.")
         lines.append("- Both Fixed baselines (Fixed Robust: BPSK, Fixed High-Throughput: 64-QAM) are defined and ready for comparative benchmarking.")
 
@@ -514,40 +570,52 @@ def generate_l3_report(
 
 if __name__ == "__main__":
     print("=== PHY-ML: L3 Ground Truth & Baseline Policies ===")
-    default_cal_path = Path("results/l2_cuda_rtx3060/calibration_1d_cuda_pooled.csv")
-    csv_path = default_cal_path if default_cal_path.exists() else Path("results/calibration_1d_rayleigh.csv")
+    cal_path = Path("results/l2_cuda_rtx3060_final/calibration_1d_cuda_pooled.csv")
+    if not cal_path.exists():
+        raise FileNotFoundError(
+            f"Required final L2 calibration table not found at: {cal_path}. "
+            f"Execution halted: silent fallbacks to historical files are prohibited."
+        )
 
     config = GroundTruthConfig(
-        ber_target=0.01,  # 1% target uncoded BER
+        ber_target=BER_TARGET,  # 1% target uncoded BER
         fallback_policy="robustest_mode",
-        confidence_k=1.96,
+        confidence_k=CONFIDENCE_K,
     )
 
-    print(f"Loading raw calibration table: {csv_path}...")
-    cal_data = load_calibration_csv(csv_path)
+    print(f"Loading raw calibration table: {cal_path}...")
+    cal_data = load_calibration_csv(cal_path)
 
     print(f"Synthesizing ground truth with BER target = {config.ber_target:.4f} ({config.ber_target*100:.1f}%)...")
     gt_rows = compute_ground_truth(cal_data, config)
 
-    gt_csv_path = Path("results/ground_truth_1d.csv")
+    # Output directory: results/l3_final
+    out_dir = Path("results/l3_final")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    gt_csv_path = out_dir / "ground_truth_1d.csv"
     save_ground_truth_csv(gt_rows, gt_csv_path)
     print(f"Ground truth table saved to: {gt_csv_path}")
 
     # Build 1D LUT
     lut = LookupTable1D.from_ground_truth(gt_rows)
+    lut_csv_path = out_dir / "lut_1d.csv"
+    save_lut_csv(lut, lut_csv_path)
+    print(f"1D LUT table saved to: {lut_csv_path}")
+
     print("\nDerived 1D LUT Thresholds:")
     for th, p_m, n_m in lut.thresholds:
         print(f"  Threshold {th:5.2f} dB: {p_m} -> {n_m}")
 
     # Generate Telecom Report
-    l3_report_path = Path("results/l3_ground_truth_report.md")
+    l3_report_path = out_dir / "l3_ground_truth_report.md"
     report_text = generate_l3_report(
         rows=gt_rows,
         lut=lut,
         config=config,
-        num_blocks=5000,
         symbols_per_block=1536,
         output_path=l3_report_path,
+        source_dataset=str(cal_path).replace("\\", "/"),
     )
     print(f"\nL3 Telecom report saved to: {l3_report_path}")
 

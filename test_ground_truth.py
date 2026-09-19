@@ -1,4 +1,5 @@
 """Unit tests for L3 Ground Truth & Baseline Policies."""
+from pathlib import Path
 import unittest
 import numpy as np
 
@@ -6,6 +7,7 @@ from ground_truth import (
     GroundTruthConfig,
     GroundTruthRow,
     compute_ground_truth,
+    load_calibration_csv,
     FixedRobustPolicy,
     FixedHighThroughputPolicy,
     LookupTable1D,
@@ -197,6 +199,126 @@ class TestGroundTruth(unittest.TestCase):
         self.assertEqual(lut.predict(22.75), "16QAM")
         self.assertEqual(lut.predict(28.24), "16QAM")
         self.assertEqual(lut.predict(28.25), "64QAM")
+
+    def test_point_estimate_eligibility(self):
+        """Verify candidate mode is eligible iff BER_point_estimate <= 0.0100."""
+        test_data = {
+            20.0: {
+                "BPSK": {"ber": 0.005, "se": 0.0005},
+                "QPSK": {"ber": 0.010000, "se": 0.0005},   # Exactly at target: eligible
+                "16QAM": {"ber": 0.010001, "se": 0.0005},  # Strictly above target: ineligible
+                "64QAM": {"ber": 0.050, "se": 0.0010},
+            }
+        }
+        cfg = GroundTruthConfig(ber_target=0.01)
+        rows = compute_ground_truth(test_data, cfg)
+        r = rows[0]
+
+        self.assertTrue(r.bpsk_eligible)
+        self.assertTrue(r.qpsk_eligible, "BER == 0.010000 must be eligible")
+        self.assertFalse(r.qam16_eligible, "BER == 0.010001 must NOT be eligible")
+        self.assertFalse(r.qam64_eligible)
+        self.assertEqual(r.best_mode, "QPSK", "Highest rate eligible mode is QPSK (2 bpcu)")
+
+    def test_fallback_behavior(self):
+        """Verify fallback selects BPSK with fallback_used=True when no mode qualifies."""
+        test_data = {
+            5.0: {
+                "BPSK": {"ber": 0.05, "se": 0.002},
+                "QPSK": {"ber": 0.08, "se": 0.003},
+                "16QAM": {"ber": 0.15, "se": 0.004},
+                "64QAM": {"ber": 0.25, "se": 0.005},
+            }
+        }
+        cfg = GroundTruthConfig(ber_target=0.01, fallback_policy="robustest_mode")
+        rows = compute_ground_truth(test_data, cfg)
+        r = rows[0]
+
+        self.assertTrue(r.fallback_used)
+        self.assertEqual(r.best_mode, "BPSK")
+        self.assertEqual(r.best_mode_bps, 1)
+
+    def test_lut_midpoint_construction(self):
+        """Verify LUT switching thresholds are exactly the midpoint of adjacent sampled grid points."""
+        test_data = {
+            10.0: {"BPSK": {"ber": 0.005, "se": 0.0005}, "QPSK": {"ber": 0.02, "se": 0.001}},
+            15.0: {"BPSK": {"ber": 0.001, "se": 0.0002}, "QPSK": {"ber": 0.006, "se": 0.0005}},
+        }
+        cfg = GroundTruthConfig(ber_target=0.01)
+        rows = compute_ground_truth(test_data, cfg)
+        lut = LookupTable1D.from_ground_truth(rows)
+
+        self.assertEqual(len(lut.thresholds), 1)
+        th, p_m, n_m = lut.thresholds[0]
+        self.assertEqual(th, 12.5, "Midpoint between 10.0 and 15.0 must be exactly 12.5 dB")
+        self.assertEqual(p_m, "BPSK")
+        self.assertEqual(n_m, "QPSK")
+
+    def test_monotonic_mode_progression(self):
+        """Verify detection of monotonic and non-monotonic mode progressions."""
+        # Case 1: Monotonic
+        mono_data = {
+            10.0: {"BPSK": {"ber": 0.005, "se": 0.0005}, "QPSK": {"ber": 0.02, "se": 0.001}},
+            15.0: {"BPSK": {"ber": 0.001, "se": 0.0002}, "QPSK": {"ber": 0.006, "se": 0.0005}},
+        }
+        lut_mono = LookupTable1D.from_ground_truth(compute_ground_truth(mono_data, GroundTruthConfig(ber_target=0.01)))
+        self.assertEqual(len(lut_mono.non_monotonic_transitions), 0)
+
+        # Case 2: Inversion / non-monotonic
+        inversion_data = {
+            10.0: {"BPSK": {"ber": 0.001, "se": 0.0001}, "QPSK": {"ber": 0.004, "se": 0.0003}},  # QPSK (2 bpcu)
+            15.0: {"BPSK": {"ber": 0.008, "se": 0.0005}, "QPSK": {"ber": 0.015, "se": 0.0010}},  # BPSK (1 bpcu)
+        }
+        lut_inv = LookupTable1D.from_ground_truth(compute_ground_truth(inversion_data, GroundTruthConfig(ber_target=0.01)))
+        self.assertEqual(len(lut_inv.non_monotonic_transitions), 1)
+        th, p_m, n_m = lut_inv.non_monotonic_transitions[0]
+        self.assertEqual(p_m, "QPSK")
+        self.assertEqual(n_m, "BPSK")
+
+    def test_frozen_final_l2_dataset_acceptance(self):
+        """Acceptance test verifying complete integration with frozen final L2 dataset."""
+        cal_path = Path("results/l2_cuda_rtx3060_final/calibration_1d_cuda_pooled.csv")
+        if not cal_path.exists():
+            self.skipTest("Frozen final L2 calibration dataset not present")
+
+        cal_data = load_calibration_csv(cal_path)
+
+        # 1. Exactly 25 SNR points and 4 modulations per SNR
+        self.assertEqual(len(cal_data), 25, "Expected exactly 25 SNR points")
+        for snr, mods in cal_data.items():
+            self.assertEqual(len(mods), 4, f"SNR {snr} must have exactly 4 modulation modes")
+            self.assertEqual(set(mods.keys()), {"BPSK", "QPSK", "16QAM", "64QAM"})
+
+        cfg = GroundTruthConfig(ber_target=0.01, fallback_policy="robustest_mode", confidence_k=1.96)
+        rows = compute_ground_truth(cal_data, cfg)
+        self.assertEqual(len(rows), 25)
+
+        # 2. Mode counts
+        mode_counts = {}
+        for r in rows:
+            mode_counts[r.best_mode] = mode_counts.get(r.best_mode, 0) + 1
+        self.assertEqual(mode_counts.get("BPSK"), 10)
+        self.assertEqual(mode_counts.get("QPSK"), 6)
+        self.assertEqual(mode_counts.get("16QAM"), 5)
+        self.assertEqual(mode_counts.get("64QAM"), 4)
+
+        # 3. Fallback points (0.0 to 12.0 dB)
+        fallback_snrs = [r.snr_db for r in rows if r.fallback_used]
+        self.assertEqual(fallback_snrs, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0])
+
+        # 4. Uncertainty points
+        rel_unc_snrs = [r.snr_db for r in rows if r.reliability_uncertain]
+        lbl_unc_snrs = [r.snr_db for r in rows if r.label_uncertain]
+        self.assertEqual(rel_unc_snrs, [14.0, 23.0, 28.0])
+        self.assertEqual(lbl_unc_snrs, [23.0, 28.0])
+
+        # 5. LUT thresholds & monotonicity
+        lut = LookupTable1D.from_ground_truth(rows)
+        self.assertEqual(len(lut.non_monotonic_transitions), 0, "Monotonicity must PASS")
+        self.assertEqual(
+            lut.thresholds,
+            [(16.75, "BPSK", "QPSK"), (22.75, "QPSK", "16QAM"), (28.25, "16QAM", "64QAM")]
+        )
 
 
 if __name__ == "__main__":

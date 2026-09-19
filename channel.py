@@ -16,7 +16,7 @@ Where:
 """
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
 import numpy as np
 import torch
 from sionna.phy.channel import GenerateFlatFadingChannel
@@ -57,16 +57,18 @@ class ChannelOutput:
     noise: torch.Tensor             # actual complex noise added, 1D complex128 torch.Tensor
 
 
-@lru_cache(maxsize=1)
-def _get_flat_fading_model() -> GenerateFlatFadingChannel:
+@lru_cache(maxsize=4)
+def _get_flat_fading_model(precision: str = "double", device: Union[torch.device, str] = "cpu") -> GenerateFlatFadingChannel:
     """Instantiate and cache canonical Sionna GenerateFlatFadingChannel model."""
-    return GenerateFlatFadingChannel(num_tx_ant=1, num_rx_ant=1, precision="double")
+    return GenerateFlatFadingChannel(num_tx_ant=1, num_rx_ant=1, precision=precision, device=str(device))
 
 
 def generate_channel_coefficient(
     generator: Optional[torch.Generator] = None,
     channel_type: str = "rayleigh",
     h_magnitude: Optional[float] = None,
+    precision: str = "double",
+    device: Union[torch.device, str] = "cpu",
 ) -> torch.Tensor:
     """Generate one scalar channel coefficient h constant for an entire block.
 
@@ -79,31 +81,40 @@ def generate_channel_coefficient(
     h_magnitude : float, optional
         If provided for Rayleigh channel, fixes |h| = h_magnitude and randomizes
         phase uniformly in [0, 2*pi). Experimental conditioning for 2D sweeps.
+    precision : str, default 'double'
+        'double' (complex128) or 'single' (complex64).
+    device : torch.device or str, default 'cpu'
+        Target PyTorch device.
 
     Returns
     -------
     torch.Tensor
-        Scalar complex128 channel coefficient h.
+        Scalar channel coefficient h on target device.
     """
     ch = channel_type.lower().strip()
+    c_dtype = torch.complex128 if precision == "double" else torch.complex64
+    r_dtype = torch.float64 if precision == "double" else torch.float32
+    dev = torch.device(device)
+
     if ch == "awgn":
-        return torch.tensor(1.0 + 0.0j, dtype=torch.complex128)
+        return torch.tensor(1.0 + 0.0j, dtype=c_dtype, device=dev)
     if ch == "rayleigh":
         if h_magnitude is not None:
             if h_magnitude < 0:
                 raise ValueError("h_magnitude must be non-negative")
-            theta = torch.rand(1, generator=generator, dtype=torch.float64).item() * (2.0 * np.pi)
+            theta = torch.rand(1, generator=generator, dtype=r_dtype, device=dev).item() * (2.0 * np.pi)
             return torch.tensor(
                 complex(h_magnitude * np.cos(theta), h_magnitude * np.sin(theta)),
-                dtype=torch.complex128,
+                dtype=c_dtype,
+                device=dev,
             )
         # Canonical Sionna GenerateFlatFadingChannel primitive
-        gfc = _get_flat_fading_model()
+        gfc = _get_flat_fading_model(precision=precision, device=str(device))
         if generator is not None:
             seed = torch.randint(0, 2**31 - 1, (1,), generator=generator).item()
             gfc.torch_rng.manual_seed(seed)
         h = gfc(batch_size=1).squeeze()
-        return h.to(torch.complex128)
+        return h.to(dtype=c_dtype, device=dev)
 
     raise ValueError(f"Unsupported channel_type: {channel_type}. Supported: 'rayleigh', 'awgn'")
 
@@ -111,11 +122,13 @@ def generate_channel_coefficient(
 def generate_standard_noise(
     num_symbols: int,
     generator: Optional[torch.Generator] = None,
+    precision: str = "double",
+    device: Union[torch.device, str] = "cpu",
 ) -> torch.Tensor:
     """Generate unit-variance standard complex Gaussian noise CN(0, 1) using Sionna."""
     if num_symbols < 1:
         raise ValueError("num_symbols must be >= 1")
-    return complex_normal([num_symbols], precision="double", generator=generator)
+    return complex_normal([num_symbols], precision=precision, device=str(device), generator=generator)
 
 
 def apply_channel(
@@ -127,6 +140,7 @@ def apply_channel(
     noise_generator: Optional[torch.Generator] = None,
     fading_generator: Optional[torch.Generator] = None,
     standard_noise: Optional[torch.Tensor] = None,
+    precision: Optional[str] = None,
 ) -> ChannelOutput:
     """Pass a block of transmitted symbols through a slow block fading / AWGN channel.
 
@@ -136,7 +150,7 @@ def apply_channel(
     Parameters
     ----------
     transmitted_symbols : torch.Tensor
-        1D complex128 torch.Tensor of transmitted symbols (unit average energy Es = 1).
+        1D torch.Tensor of transmitted symbols (unit average energy Es = 1).
     snr_db : float
         Nominal setup Es/N0 in dB. N0 = 1 / db_to_lin(snr_db).
     channel_type : str, default 'rayleigh'
@@ -151,6 +165,8 @@ def apply_channel(
         RNG for fading generation. Required if h is None.
     standard_noise : torch.Tensor, optional
         Pre-generated CN(0, 1) standard noise vector for paired evaluations.
+    precision : str, optional
+        'double' or 'single'. Inferred from transmitted_symbols if None.
 
     Returns
     -------
@@ -158,7 +174,14 @@ def apply_channel(
         Dataclass containing received symbols y, channel coefficient h,
         noise variance N0, nominal snr_db, and the added noise n.
     """
-    x = torch.as_tensor(transmitted_symbols, dtype=torch.complex128)
+    if not isinstance(transmitted_symbols, torch.Tensor):
+        transmitted_symbols = torch.as_tensor(transmitted_symbols)
+    dev = transmitted_symbols.device
+    if precision is None:
+        precision = "single" if transmitted_symbols.dtype in (torch.complex64, torch.float32) else "double"
+    c_dtype = torch.complex128 if precision == "double" else torch.complex64
+
+    x = torch.as_tensor(transmitted_symbols, dtype=c_dtype, device=dev)
     if x.ndim != 1 or len(x) == 0:
         raise ValueError("transmitted_symbols must be a non-empty 1D tensor")
 
@@ -168,21 +191,23 @@ def apply_channel(
             generator=fading_generator,
             channel_type=channel_type,
             h_magnitude=h_magnitude,
+            precision=precision,
+            device=dev,
         )
     else:
-        h_val = torch.as_tensor(h, dtype=torch.complex128).squeeze()
+        h_val = torch.as_tensor(h, dtype=c_dtype, device=dev).squeeze()
 
     # Determine noise variance via Sionna db_to_lin: N0 = 1 / db_to_lin(snr_db)
-    esno_lin = db_to_lin(snr_db, precision="double")
+    esno_lin = db_to_lin(snr_db, precision=precision, device=str(dev))
     n0 = 1.0 / esno_lin
 
     if standard_noise is not None:
-        std_n = torch.as_tensor(standard_noise, dtype=torch.complex128)
+        std_n = torch.as_tensor(standard_noise, dtype=c_dtype, device=dev)
         if std_n.shape != x.shape:
             raise ValueError(f"standard_noise shape {std_n.shape} does not match symbols shape {x.shape}")
         actual_noise = torch.sqrt(n0) * std_n
     else:
-        std_n = generate_standard_noise(len(x), generator=noise_generator)
+        std_n = generate_standard_noise(len(x), generator=noise_generator, precision=precision, device=dev)
         actual_noise = torch.sqrt(n0) * std_n
 
     # Physical model: y = h * x + n (one scalar h for the entire block)

@@ -39,7 +39,7 @@ The project separates **experimental control** from **canonical PHY primitives**
 
 **L3 Ground Truth & Baseline Policies Completed**
 Workflow:
-`L1 Verified PHY Core` $\to$ `L2 1D Monte Carlo Calibration (5,000 blocks / point)` $\to$ `L3 Ground Truth (BestMode) & Baselines (Fixed Robust, Fixed High-Throughput, 1D LUT)`.
+`L1 Verified PHY Core` $\to$ `L2 Fixed-Budget Monte Carlo Calibration (light: 10k/seed, deep: 70k/seed)` $\to$ `L3 Ground Truth (BestMode) & Baselines (Fixed Robust, Fixed High-Throughput, 1D LUT)`.
 
 ---
 
@@ -199,11 +199,23 @@ test_14_modulation_order_invariance_for_paired_eval ... ok
 - `RawPHYCounters`: Stateful accumulator for bits, blocks, BER, BLER, mean block BER, and block standard error ($SE$).
 - `count_errors`, `count_block_errors`, `compute_ber`, `compute_bler`: Sionna 2.0 canonical functions.
 
-### `calibration_1d.py` (L2)
+### `calibration_1d.py` (L2 CPU Prototype)
 - `Calibration1DConfig`: Configuration parameters (SNR grid, num_blocks=5000, batch_blocks=500, symbols_per_block=1536, master_seed).
 - `run_1d_calibration(config) -> List[CalibrationRecord]`: Vectorized chunk-batching Monte Carlo calibration preserving paired realizations.
 - `save_calibration_csv(records, output_path)`: Exports raw counts, block variance, and SE to CSV.
 - `generate_verification_report(records, config, records_seed_b, ...) -> str`: Rigorous telecom report comparing empirical curves against independent SciPy analytical theory using block standard errors.
+
+### `calibration_l2_cuda.py` (L2 Canonical Fixed-Budget CUDA Engine)
+- **Methodology:** Fixed-budget Monte Carlo calibration across 25 SNR operating points (NO adaptive stopping).
+- **Profiles:**
+  - `light`: 10,000 blocks/seed (20,000 pooled blocks/point) $\to$ `results/r0_mc_light_10k/`
+  - `deep`: 70,000 blocks/seed (140,000 pooled blocks/point) $\to$ `results/r0_mc_deep_70k/`
+  - Arbitrary override: `--blocks-per-seed N` $\to$ deterministic custom directory `results/r0_mc_custom_{N}k/`
+- **Observational Trajectory:** Checkpoints recorded every 5,000 blocks/seed for human convergence inspection only (strictly non-stopping).
+- **CLI Commands:**
+  - `python calibration_l2_cuda.py --profile light`
+  - `python calibration_l2_cuda.py --profile deep`
+  - `python calibration_l2_cuda.py --blocks-per-seed 100000`
 
 ### `ground_truth.py` (L3)
 - `GroundTruthConfig`: Explicit parameters (`ber_target=0.01`, `fallback_policy="robustest_mode"`, `confidence_k=1.96`).

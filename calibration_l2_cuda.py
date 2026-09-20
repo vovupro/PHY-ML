@@ -1,32 +1,44 @@
-"""L2: Fresh Adaptive Monte Carlo Calibration Engine using Vectorized CUDA Hot-Path.
+"""L2: Fixed-Budget Monte Carlo Calibration Engine using Vectorized CUDA Hot-Path.
 
 Features:
-    - 25-point canonical SNR grid [0, 30] dB with 0.5 dB resolution in transition regions.
-    - True CUDA batch hot-path (RTX 3060, optimal batch size = 500, FP64 double precision).
+    - Fixed-budget Monte Carlo calibration across 25-point canonical SNR grid [0, 30] dB.
+    - NO ADAPTIVE STOPPING: every requested operating point runs strictly to the configured budget.
+    - Two canonical fixed-budget profiles:
+        * 'light' = 10,000 blocks/seed (20,000 blocks pooled per SNR)
+        * 'deep'  = 70,000 blocks/seed (140,000 blocks pooled per SNR)
+    - Arbitrary budget overrides supported (e.g. --blocks-per-seed 100000, 200000).
+    - Deterministic output isolation:
+        * 'light' -> results/r0_mc_light_10k/
+        * 'deep'  -> results/r0_mc_deep_70k/
+        * custom  -> results/r0_mc_custom_{N}k/
+    - Checkpoint convergence trajectory recorded every 5,000 blocks/seed:
+      BER, SE, 95% CI lower/upper, target overlap (BER_target = 0.0100).
+      This trajectory is purely for human observational analysis; it never affects stopping.
+    - True CUDA batch hot-path (RTX 3060, batch size = 500, FP64 double precision).
     - Independent Seed A (20260918) and Seed B (20260919) Monte Carlo streams.
     - Online Chan/Welford parallel variance accumulation across fading blocks.
-    - 3-criterion adaptive convergence across two consecutive checkpoints:
-        1. Seed consistency: z_AB <= 3.0
-        2. Precision: 1.96 * SE_pooled <= max(0.10 * BER_pooled, 1e-4)
-        3. Estimate movement: |delta BER_pooled| <= max(1.96 * SE_pooled, 1e-4)
-    - Safety ceiling: 200,000 blocks/seed.
-    - Preserves uncertainty semantics without forcing binary decisions near BER_target = 0.01.
-    - Output isolation: writes fresh files to results/l2_cuda_rtx3060/.
 """
+import argparse
 import csv
 from dataclasses import dataclass
 import math
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 from sionna.phy.utils import db_to_lin
 
-from config import ExecutionConfig, probe_environment, print_environment_report
+from config import (
+    ExecutionConfig,
+    FIXED_MC_PROFILES,
+    resolve_results_dir,
+    probe_environment,
+    print_environment_report,
+)
 from phy_engine import ModulationMode, MODES
 from cuda_engine import BatchPHYEngine, OnlineBlockStats
 from calibration_1d import theoretical_bpsk_rayleigh
-from metrics import is_reliability_uncertain, BER_TARGET
+from metrics import is_reliability_uncertain, BER_TARGET, CONFIDENCE_K
 
 
 GRID_25_POINTS: Tuple[float, ...] = (
@@ -39,7 +51,11 @@ GRID_25_POINTS: Tuple[float, ...] = (
 
 @dataclass
 class ConvergenceCheckpointState:
-    """State of an SNR operating point at a convergence checkpoint."""
+    """State of an SNR operating point at an observational convergence checkpoint.
+
+    Note: Checkpoints are recorded strictly for human convergence inspection.
+    They do not affect fixed-budget simulation stopping.
+    """
     checkpoint_idx: int
     blocks_per_seed: int
     total_blocks_pooled: int
@@ -48,10 +64,17 @@ class ConvergenceCheckpointState:
     pooled_ber: Dict[int, float]
     pooled_se: Dict[int, float]
     z_ab: Dict[int, float]
-    crit_seed: Dict[int, bool]
-    crit_prec: Dict[int, bool]
-    crit_move: Dict[int, bool]
-    all_crit_passed: bool
+    ci_low: Optional[Dict[int, float]] = None
+    ci_high: Optional[Dict[int, float]] = None
+    overlaps_target: Optional[Dict[int, bool]] = None
+    crit_seed: Optional[Dict[int, bool]] = None
+    crit_prec: Optional[Dict[int, bool]] = None
+    crit_move: Optional[Dict[int, bool]] = None
+    all_crit_passed: bool = False
+
+
+# Alias for clean semantic naming
+TrajectoryCheckpointRecord = ConvergenceCheckpointState
 
 
 def pool_two_streams(
@@ -88,15 +111,34 @@ def pool_two_streams(
 
 def run_fresh_l2_cuda_calibration(
     config: Optional[ExecutionConfig] = None,
+    profile: Optional[str] = None,
+    blocks_per_seed: Optional[int] = None,
+    snrs: Optional[Sequence[float]] = None,
 ) -> Dict[str, Any]:
-    """Execute complete fresh L2 calibration on NVIDIA RTX 3060 with adaptive convergence."""
+    """Execute complete fixed-budget L2 calibration on NVIDIA RTX 3060 (NO ADAPTIVE STOPPING)."""
     if config is None:
+        p_name = profile if profile in FIXED_MC_PROFILES else "deep"
+        b_count = blocks_per_seed if blocks_per_seed is not None else FIXED_MC_PROFILES[p_name]
+        out_dir = resolve_results_dir(profile=p_name if blocks_per_seed is None else None, blocks_per_seed=b_count)
         config = ExecutionConfig(
             backend="cuda",
             precision="double",
             batch_blocks=500,
-            results_dir="results/l2_cuda_rtx3060",
+            results_dir=out_dir,
+            blocks_per_seed=b_count,
+            profile=p_name if blocks_per_seed is None else None,
         )
+    else:
+        if blocks_per_seed is not None:
+            config.blocks_per_seed = blocks_per_seed
+            config.profile = profile
+            config.results_dir = resolve_results_dir(profile, blocks_per_seed, config.results_dir)
+        elif profile is not None:
+            config.profile = profile
+            config.blocks_per_seed = FIXED_MC_PROFILES[profile]
+            config.results_dir = resolve_results_dir(profile, config.blocks_per_seed, config.results_dir)
+        else:
+            config.results_dir = resolve_results_dir(config.profile, config.blocks_per_seed, config.results_dir)
 
     out_dir = Path(config.results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -107,13 +149,18 @@ def run_fresh_l2_cuda_calibration(
     device_str = env["selected_device"]
     prec_str = env["sionna_precision"]
     batch_size = config.batch_blocks
+    snr_grid = GRID_25_POINTS if snrs is None else tuple(snrs)
+
+    target_budget = config.blocks_per_seed
+    step_size = config.checkpoint_step
 
     print("\n" + "=" * 75)
-    print(f"   STARTING FRESH L2 RUN: {len(GRID_25_POINTS)} SNR POINTS, DUAL-SEED ADAPTIVE CONVERGENCE")
+    print(f"   STARTING FIXED-BUDGET L2 RUN: {len(snr_grid)} SNR POINTS (NO ADAPTIVE STOPPING)")
+    print(f"   Profile: {config.profile or 'custom'} | Budget: {target_budget:,} blocks/seed ({target_budget * 2:,} pooled)")
     print(f"   Device: {device_str} | Precision: {prec_str} | Batch Size: {batch_size}")
     print(f"   Seed A: {config.master_seed_a} | Seed B: {config.master_seed_b}")
-    print(f"   Initial Budget: {config.initial_blocks_per_seed:,} blocks/seed | Increment: {config.block_increment:,} blocks/seed")
-    print(f"   Safety Ceiling: {config.max_blocks_per_seed:,} blocks/seed")
+    print(f"   Checkpoint Step: {step_size:,} blocks/seed (Human Inspection Trajectory Only)")
+    print(f"   Output Directory: {config.results_dir}")
     print("=" * 75, flush=True)
 
     # 1. Warm-up GPU
@@ -133,14 +180,14 @@ def run_fresh_l2_cuda_calibration(
     warmup_time = t_init_1 - t_init_0
     print(f"Modem & GPU Warm-up complete in {warmup_time:.3f} s\n")
 
-    snr_grid = GRID_25_POINTS
     snr_results = {}
     total_blocks_simulated = 0
 
     t_mc_start = time.perf_counter()
 
     for idx, snr_db in enumerate(snr_grid):
-        print(f"\n>>> [{idx+1:2d}/{len(snr_grid):2d}] Simulating SNR = {snr_db:4.1f} dB ...", flush=True)
+        print(f"\n>>> [{idx+1:2d}/{len(snr_grid):2d}] Simulating SNR = {snr_db:4.1f} dB "
+              f"(Fixed Budget: {target_budget:,} blks/seed | {target_budget * 2:,} pooled) ...", flush=True)
         t_snr_0 = time.perf_counter()
 
         stats_a = {m.mode_id: OnlineBlockStats(m.bits_per_symbol) for m in MODES}
@@ -150,21 +197,15 @@ def run_fresh_l2_cuda_calibration(
         blocks_done_b = 0
         chunk_idx_a = 0
         chunk_idx_b = 0
-
-        prev_pooled_ber: Dict[int, float] = {}
-        consecutive_stable_count = 0
         checkpoint_idx = 0
-        snr_stable = False
-        ceiling_hit = False
 
         checkpoint_history: List[ConvergenceCheckpointState] = []
 
-        while not snr_stable and not ceiling_hit:
+        target_blocks = 0
+        # STRICT FIXED BUDGET: Loop until target_blocks reaches target_budget
+        while target_blocks < target_budget:
             checkpoint_idx += 1
-            target_blocks = config.initial_blocks_per_seed + (checkpoint_idx - 1) * config.block_increment
-            if target_blocks > config.max_blocks_per_seed:
-                ceiling_hit = True
-                target_blocks = config.max_blocks_per_seed
+            target_blocks = min(target_blocks + step_size, target_budget)
 
             # --- 1. Run Stream A until target_blocks ---
             while blocks_done_a < target_blocks:
@@ -197,53 +238,31 @@ def run_fresh_l2_cuda_calibration(
             if "cuda" in device_str:
                 torch.cuda.synchronize()
 
-            # --- 3. Evaluate 3 Convergence Criteria at this Checkpoint ---
-            crit_seed_map = {}
-            crit_prec_map = {}
-            crit_move_map = {}
-            z_ab_map = {}
+            # --- 3. Evaluate Checkpoint Statistics (Human Inspection Trajectory Only) ---
             cur_pooled_ber = {}
             cur_pooled_se = {}
-
-            all_crit_this_chk = True
+            cur_ci_low = {}
+            cur_ci_high = {}
+            cur_overlaps = {}
+            z_ab_map = {}
 
             for m in MODES:
                 sa = stats_a[m.mode_id]
                 sb = stats_b[m.mode_id]
-
-                # Pooled BER and SE
                 ber_pool, mean_pool, se_pool = pool_two_streams(sa, sb)
                 cur_pooled_ber[m.mode_id] = ber_pool
                 cur_pooled_se[m.mode_id] = se_pool
 
-                # Combined SE for z_AB
+                ci_hw = CONFIDENCE_K * se_pool
+                cur_ci_low[m.mode_id] = max(0.0, float(ber_pool - ci_hw))
+                cur_ci_high[m.mode_id] = float(ber_pool + ci_hw)
+                cur_overlaps[m.mode_id] = is_reliability_uncertain(
+                    ber_pool, se_pool, target=BER_TARGET, k=CONFIDENCE_K
+                )
+
                 comb_se = math.sqrt(sa.se_block_ber**2 + sb.se_block_ber**2)
                 z_ab = (abs(sa.ber - sb.ber) / comb_se) if comb_se > 1e-12 else 0.0
                 z_ab_map[m.mode_id] = z_ab
-
-                # 1. Seed consistency: z_AB <= 3.0
-                pass_seed = (z_ab <= 3.0) or (sa.bit_errors == 0 and sb.bit_errors == 0)
-
-                # 2. Precision: 1.96 * SE_pooled <= max(0.10 * BER_pooled, 1e-4)
-                tol_prec = max(0.10 * ber_pool, 1e-4)
-                ci_half_width = 1.96 * se_pool
-                pass_prec = (ci_half_width <= tol_prec) or (ber_pool == 0.0)
-
-                # 3. Estimate movement: |delta BER_pooled| <= max(1.96 * SE_pooled, 1e-4)
-                if checkpoint_idx > 1 and m.mode_id in prev_pooled_ber:
-                    delta_move = abs(ber_pool - prev_pooled_ber[m.mode_id])
-                    tol_move = max(1.96 * se_pool, 1e-4)
-                    pass_move = (delta_move <= tol_move)
-                else:
-                    # First checkpoint cannot establish movement criterion
-                    pass_move = False
-
-                crit_seed_map[m.mode_id] = pass_seed
-                crit_prec_map[m.mode_id] = pass_prec
-                crit_move_map[m.mode_id] = pass_move
-
-                if not (pass_seed and pass_prec and pass_move):
-                    all_crit_this_chk = False
 
             chk_state = ConvergenceCheckpointState(
                 checkpoint_idx=checkpoint_idx,
@@ -253,32 +272,21 @@ def run_fresh_l2_cuda_calibration(
                 mod_stats_b={m.mode_id: stats_b[m.mode_id] for m in MODES},
                 pooled_ber=cur_pooled_ber,
                 pooled_se=cur_pooled_se,
+                ci_low=cur_ci_low,
+                ci_high=cur_ci_high,
+                overlaps_target=cur_overlaps,
                 z_ab=z_ab_map,
-                crit_seed=crit_seed_map,
-                crit_prec=crit_prec_map,
-                crit_move=crit_move_map,
-                all_crit_passed=all_crit_this_chk,
             )
             checkpoint_history.append(chk_state)
 
+            ov_bpsk = "YES" if cur_overlaps[0] else "NO"
+            ov_64qam = "YES" if cur_overlaps[3] else "NO"
             print(
-                f"   [Chk #{checkpoint_idx:02d} | {blocks_done_a:,} blks/seed] "
-                f"Crit Passed: {all_crit_this_chk} "
-                f"(BPSK z={z_ab_map[0]:.2f}, QPSK z={z_ab_map[1]:.2f}, 16QAM z={z_ab_map[2]:.2f}, 64QAM z={z_ab_map[3]:.2f})",
+                f"   [Chk #{checkpoint_idx:02d} | {blocks_done_a:6,d} blks/seed | {blocks_done_a + blocks_done_b:7,d} pooled] "
+                f"BPSK: {cur_pooled_ber[0]:.4e} (CI: [{cur_ci_low[0]:.4e}, {cur_ci_high[0]:.4e}], ov={ov_bpsk}) | "
+                f"64QAM: {cur_pooled_ber[3]:.4e} (CI: [{cur_ci_low[3]:.4e}, {cur_ci_high[3]:.4e}], ov={ov_64qam})",
                 flush=True,
             )
-
-            if all_crit_this_chk:
-                consecutive_stable_count += 1
-                if consecutive_stable_count >= 2:
-                    snr_stable = True
-            else:
-                consecutive_stable_count = 0
-
-            prev_pooled_ber = cur_pooled_ber
-
-            if target_blocks >= config.max_blocks_per_seed and not snr_stable:
-                ceiling_hit = True
 
         if "cuda" in device_str:
             torch.cuda.synchronize()
@@ -289,26 +297,30 @@ def run_fresh_l2_cuda_calibration(
         print(
             f"   Finished SNR = {snr_db:.1f} dB in {snr_elapsed:.2f}s | "
             f"Blocks: {blocks_done_a:,} x 2 = {blocks_done_a + blocks_done_b:,} | "
-            f"Stable: {snr_stable} (Ceiling hit: {ceiling_hit})",
+            f"Status: FIXED_BUDGET_REACHED (No early stopping)",
             flush=True,
         )
 
         snr_results[snr_db] = {
             "snr_db": snr_db,
+            "requested_blocks_per_seed": target_budget,
+            "actual_blocks_per_seed": blocks_done_a,
             "final_blocks_a": blocks_done_a,
             "final_blocks_b": blocks_done_b,
             "total_blocks_pooled": blocks_done_a + blocks_done_b,
             "elapsed_seconds": snr_elapsed,
-            "stable": snr_stable,
-            "ceiling_hit": ceiling_hit,
-            "convergence_not_reached": not snr_stable,
+            "stable": True,
+            "ceiling_hit": False,
             "checkpoints_count": checkpoint_idx,
             "checkpoint_history": checkpoint_history,
             "final_stats_a": stats_a,
             "final_stats_b": stats_b,
-            "final_pooled_ber": prev_pooled_ber,
-            "final_pooled_se": checkpoint_history[-1].pooled_se,
-            "final_z_ab": checkpoint_history[-1].z_ab,
+            "final_pooled_ber": cur_pooled_ber,
+            "final_pooled_se": cur_pooled_se,
+            "final_ci_low": cur_ci_low,
+            "final_ci_high": cur_ci_high,
+            "final_overlaps_target": cur_overlaps,
+            "final_z_ab": z_ab_map,
         }
 
     t_mc_end = time.perf_counter()
@@ -391,7 +403,6 @@ def run_fresh_l2_cuda_calibration(
                 tot_blks = sa.count + sb.count
                 tot_blk_errs = sa.block_errors + sb.block_errors
 
-                # Uncertainty semantics: mark if empirical 95% CI overlaps BER_target = 0.01 exactly
                 uncertain = is_reliability_uncertain(ber_pool, se_pool)
 
                 writer.writerow({
@@ -409,7 +420,7 @@ def run_fresh_l2_cuda_calibration(
                     "std_block_ber": se_pool * math.sqrt(tot_blks),
                     "se_block_ber": se_pool,
                     "z_ab": z,
-                    "is_stable": res["stable"],
+                    "is_stable": True,
                     "reliability_uncertain": uncertain,
                 })
 
@@ -432,8 +443,11 @@ def run_fresh_l2_cuda_calibration(
     symbols_sec = throughput_overall * config.symbols_per_block
 
     print("\n" + "=" * 75)
-    print("           FRESH L2 CUDA MONTE CARLO CALIBRATION COMPLETE")
+    print("      L2 CUDA FIXED-BUDGET MONTE CARLO CALIBRATION COMPLETE")
     print("=" * 75)
+    print(f"Methodology:                FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING)")
+    print(f"Requested Blocks/Seed:      {target_budget:,} blocks/seed")
+    print(f"Actual Blocks/Seed:         {target_budget:,} blocks/seed ({target_budget * 2:,} pooled/SNR)")
     print(f"Total Wall-Clock Time:      {total_wall_clock:.2f} s")
     print(f"  - Modem / GPU Warm-up:    {warmup_time:.3f} s")
     print(f"  - Pure Monte Carlo Time:  {total_mc_time:.2f} s")
@@ -470,11 +484,14 @@ def generate_markdown_report(
     output_path: Path,
     persisted_benchmark: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Format thesis-quality calibration verification and convergence report."""
-    throughput = total_blocks_simulated / total_mc_time
+    """Format thesis-quality fixed-budget calibration verification report."""
+    throughput = (total_blocks_simulated / total_mc_time) if total_mc_time > 0 else 0.0
     symbols_sec = throughput * config.symbols_per_block
 
-    # Speedup is only reported if backed by an explicit persisted benchmark (Requirement 2)
+    sample_res = next(iter(snr_results.values())) if snr_results else {}
+    actual_blocks = sample_res.get("final_blocks_a", config.blocks_per_seed)
+    requested_blocks = sample_res.get("requested_blocks_per_seed", config.blocks_per_seed)
+
     speedup_line = "- **Speedup vs. Reference CPU Implementation:** `N/A` (no persisted benchmark provided; hard-coded reference disallowed)"
     if persisted_benchmark is not None:
         ref_cpu_throughput = None
@@ -487,18 +504,26 @@ def generate_markdown_report(
             speedup = throughput / ref_cpu_throughput
             speedup_line = f"- **Speedup vs. Reference CPU Implementation:** `~{speedup:.2f}x` (from measured {ref_cpu_throughput:.1f} blocks/s to {throughput:.1f} blocks/s)"
 
+    profile_str = config.profile if config.profile else "custom"
+
     lines = [
-        "# PHY-ML L2 Monte Carlo Calibration Report (CUDA / RTX 3060 Rebuild)",
+        "# PHY-ML L2 Fixed-Budget Monte Carlo Calibration Report (CUDA / RTX 3060)",
         "",
         "**Target Platform:** Intel Core i5-14400F (16 threads) | NVIDIA GeForce RTX 3060 (12 GB VRAM)  ",
         f"**Software Stack:** PyTorch `{env['torch_version']}` | CUDA Runtime `{env['cuda_runtime_version']}` | Sionna `{env['sionna_version']}`  ",
         f"**Execution Configuration:** Backend: `{env['selected_device']}` | Precision: `{env['sionna_precision']}` ({env['selected_real_dtype']}) | Batch Size: `{config.batch_blocks}`  ",
-        f"**Date:** 2026-09-19  ",
+        "**Methodology:** **FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING)**  ",
+        f"**Simulation Profile / Budget:** `{profile_str}` | Requested: `{requested_blocks:,} blocks/seed` | Actual: `{actual_blocks:,} blocks/seed`  ",
+        "**Date:** 2026-09-20  ",
         "",
         "---",
         "",
         "## 1. Execution & Timing Summary",
         "",
+        "- **Methodology:** `FIXED-BUDGET MONTE CARLO`",
+        "- **Stopping Rule:** `NO ADAPTIVE STOPPING (every SNR evaluated strictly to fixed budget)`",
+        f"- **Requested Blocks per Seed:** `{requested_blocks:,} blocks/seed`",
+        f"- **Actual Blocks per Seed:** `{actual_blocks:,} blocks/seed` (`{actual_blocks * 2:,} pooled blocks per SNR point`)",
         f"- **Total Wall-Clock Time:** `{warmup_time + total_mc_time:.2f} seconds`",
         f"  - **Initialization & Warm-Up:** `{warmup_time:.3f} seconds`",
         f"  - **Pure Monte Carlo Simulation:** `{total_mc_time:.2f} seconds`",
@@ -534,34 +559,35 @@ def generate_markdown_report(
         "",
         "---",
         "",
-        "## 3. Dual-Seed Adaptive Convergence Table across All Modulations",
+        "## 3. Fixed-Budget Monte Carlo Calibration Table across All Modulations",
         "",
-        "Predefined 3-criterion rule satisfied across 2 consecutive checkpoints:",
-        "1. **Seed consistency:** $z_{AB} \\le 3.0$",
-        "2. **Precision:** $1.96 \\cdot SE_{pooled} \\le \\max(0.10 \\cdot BER_{pooled}, 10^{-4})$",
-        "3. **Estimate movement:** $|\\Delta BER_{pooled}| \\le \\max(1.96 \\cdot SE_{pooled}, 10^{-4})$",
+        "Methodology: **FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING)**  ",
+        f"Requested blocks/seed: `{requested_blocks:,}` | Actual blocks/seed: `{actual_blocks:,}` (`{actual_blocks * 2:,}` pooled blocks/point)  ",
         "",
-        "| SNR (dB) | Modulation | Blocks Seed A | Blocks Seed B | BER (Seed A) | BER (Seed B) | Pooled BER | Pooled SE | z_AB | Checkpoints | Stable? |",
-        "|:--------:|:----------:|:-------------:|:-------------:|:------------:|:------------:|:----------:|:---------:|:----:|:-----------:|:-------:|",
+        "| SNR (dB) | Modulation | Requested Blks/Seed | Actual Blks/Seed | Actual Pooled Blks | Pooled BER | Pooled SE | 95% Confidence Interval | Target Overlap (0.01)? | z_AB |",
+        "|:--------:|:----------:|:-------------------:|:----------------:|:------------------:|:----------:|:---------:|:-----------------------:|:----------------------:|:----:|",
     ])
 
     for snr_db in sorted(snr_results.keys()):
         res = snr_results[snr_db]
         b_a = res["final_blocks_a"]
-        b_b = res["final_blocks_b"]
-        n_chks = res["checkpoints_count"]
-        is_st = "YES" if res["stable"] else "CEILING_HIT"
+        tot_b = res.get("total_blocks_pooled", b_a * 2)
+        req_b = res.get("requested_blocks_per_seed", requested_blocks)
 
         for m in MODES:
-            sa = res["final_stats_a"][m.mode_id]
-            sb = res["final_stats_b"][m.mode_id]
             p_ber = res["final_pooled_ber"][m.mode_id]
             p_se = res["final_pooled_se"][m.mode_id]
             z = res["final_z_ab"][m.mode_id]
 
+            ci_hw = CONFIDENCE_K * p_se
+            ci_low = max(0.0, float(p_ber - ci_hw))
+            ci_high = float(p_ber + ci_hw)
+            ov = is_reliability_uncertain(p_ber, p_se, target=BER_TARGET, k=CONFIDENCE_K)
+            ov_str = "YES" if ov else "NO"
+
             lines.append(
-                f"| {snr_db:8.1f} | {m.modulation:10s} | {b_a:13,d} | {b_b:13,d} | "
-                f"{sa.ber:12.5e} | {sb.ber:12.5e} | {p_ber:10.5e} | {p_se:9.2e} | {z:4.2f} | {n_chks:11d} | {is_st:7s} |"
+                f"| {snr_db:8.1f} | {m.modulation:10s} | {req_b:19,d} | {b_a:16,d} | {tot_b:18,d} | "
+                f"{p_ber:10.5e} | {p_se:9.2e} | [{ci_low:.5e}, {ci_high:.5e}] | {ov_str:22s} | {z:4.2f} |"
             )
 
     lines.extend([
@@ -570,10 +596,12 @@ def generate_markdown_report(
         "",
         "## 4. Uncertainty & Boundary Semantics",
         "",
-        "Operating points near $BER_{target} = 0.01$ converge stably with preserved uncertainty rather than artificially inflated sampling:",
+        f"Evaluation against $BER_{{target}} = {BER_TARGET:.4f}$ using empirical 95% confidence intervals ($k = {CONFIDENCE_K}$):",
+        "- Methodology: `FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING)`",
+        f"- Requested blocks/seed: `{requested_blocks:,}` | Actual blocks/seed: `{actual_blocks:,}`",
         "",
-        "| SNR (dB) | Modulation | Pooled BER | 95% Confidence Interval | Label / Semantics |",
-        "|:--------:|:----------:|:----------:|:-----------------------:|:------------------:|",
+        "| SNR (dB) | Modulation | Pooled BER | Pooled SE | 95% Confidence Interval | Overlaps 0.01? | Label / Semantics |",
+        "|:--------:|:----------:|:----------:|:---------:|:-----------------------:|:--------------:|:-----------------:|",
     ])
 
     for snr_db in sorted(snr_results.keys()):
@@ -581,34 +609,126 @@ def generate_markdown_report(
         for m in MODES:
             p_ber = res["final_pooled_ber"][m.mode_id]
             p_se = res["final_pooled_se"][m.mode_id]
-            low = max(0.0, p_ber - 1.96 * p_se)
-            high = p_ber + 1.96 * p_se
-            if is_reliability_uncertain(p_ber, p_se):
-                lines.append(
-                    f"| {snr_db:8.1f} | {m.modulation:10s} | {p_ber:10.5e} | [{low:.5e}, {high:.5e}] | `reliability_uncertain` |"
-                )
+            low = max(0.0, p_ber - CONFIDENCE_K * p_se)
+            high = p_ber + CONFIDENCE_K * p_se
+            ov = is_reliability_uncertain(p_ber, p_se, target=BER_TARGET, k=CONFIDENCE_K)
+            ov_str = "YES" if ov else "NO"
+            label = "`reliability_uncertain`" if ov else "`resolved`"
+            lines.append(
+                f"| {snr_db:8.1f} | {m.modulation:10s} | {p_ber:10.5e} | {p_se:9.2e} | [{low:.5e}, {high:.5e}] | {ov_str:14s} | {label} |"
+            )
 
     lines.extend([
         "",
         "---",
         "",
-        "## 5. Summary & Verification Status",
+        "## 5. Checkpoint Trajectory Convergence Summary (Human Inspection Only)",
         "",
-        "- All 25 SNR grid points evaluated with dual independent seeds.",
+        f"Checkpoints were recorded every `{config.checkpoint_step:,}` blocks/seed strictly for human observational inspection and convergence analysis. No algorithmic stopping rules were applied during execution.",
+        "",
+        "---",
+        "",
+        "## 6. Summary & Verification Status",
+        "",
+        f"- **Methodology:** FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING).",
+        f"- All {len(snr_results)} SNR grid points evaluated strictly to the requested budget of {actual_blocks:,} blocks/seed ({actual_blocks * 2:,} pooled blocks per point).",
         "- Analytical Rayleigh sanity test: **PASS** across the grid.",
         "- No smoothing or synthetic alterations applied to BER estimates.",
-        "- Output artifacts successfully written to `results/l2_cuda_rtx3060/`.",
+        f"- Output artifacts successfully written to `{config.results_dir}/`.",
     ])
 
     report_text = "\n".join(lines) + "\n"
     output_path.write_text(report_text, encoding="utf-8")
 
 
-if __name__ == "__main__":
-    cfg = ExecutionConfig(
-        backend="cuda",
-        precision="double",
-        batch_blocks=500,
-        results_dir="results/l2_cuda_rtx3060",
+def main() -> None:
+    """CLI entry point supporting fixed-budget profiles and explicit overrides."""
+    parser = argparse.ArgumentParser(
+        description="PHY-ML L2 Fixed-Budget Monte Carlo Calibration Engine (CUDA FP64).",
     )
-    run_fresh_l2_cuda_calibration(cfg)
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=["light", "deep"],
+        default=None,
+        help="Fixed Monte Carlo profile: 'light' (10,000 blocks/seed) or 'deep' (70,000 blocks/seed).",
+    )
+    parser.add_argument(
+        "--blocks-per-seed",
+        type=int,
+        default=None,
+        help="Explicit arbitrary fixed budget override in blocks per seed (e.g. 100000, 200000).",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu", "auto"],
+        help="Compute backend ('cuda' canonical for production run on RTX 3060).",
+    )
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default="double",
+        choices=["double", "single"],
+        help="Numerical precision ('double' canonical FP64).",
+    )
+    parser.add_argument(
+        "--batch-blocks",
+        type=int,
+        default=500,
+        help="Batch chunk size in blocks (canonical: 500).",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=None,
+        help="Custom results directory override.",
+    )
+    parser.add_argument(
+        "--snr",
+        type=float,
+        default=None,
+        help="Optional single SNR filter for focused evaluation.",
+    )
+
+    args = parser.parse_args()
+
+    # Determine budget and profile
+    if args.blocks_per_seed is not None:
+        if args.blocks_per_seed <= 0:
+            raise ValueError(f"--blocks-per-seed must be positive, got {args.blocks_per_seed}")
+        budget = args.blocks_per_seed
+        profile_name = args.profile
+    elif args.profile is not None:
+        budget = FIXED_MC_PROFILES[args.profile]
+        profile_name = args.profile
+    else:
+        profile_name = "deep"
+        budget = FIXED_MC_PROFILES["deep"]
+
+    out_dir = resolve_results_dir(
+        profile=profile_name if args.blocks_per_seed is None else None,
+        blocks_per_seed=budget,
+        explicit_dir=args.results_dir,
+    )
+
+    cfg = ExecutionConfig(
+        backend=args.backend,
+        precision=args.precision,
+        batch_blocks=args.batch_blocks,
+        results_dir=out_dir,
+        blocks_per_seed=budget,
+        profile=profile_name,
+    )
+
+    if args.snr is not None:
+        snrs = (args.snr,)
+    else:
+        snrs = GRID_25_POINTS
+
+    run_fresh_l2_cuda_calibration(config=cfg, snrs=snrs)
+
+
+if __name__ == "__main__":
+    main()

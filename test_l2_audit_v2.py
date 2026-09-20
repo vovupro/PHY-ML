@@ -102,7 +102,7 @@ class TestL2AuditRepairs(unittest.TestCase):
         """D. Report generation cannot silently use a hard-coded CPU throughput."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             out_path = Path(tmp_dir) / "test_report.md"
-            cfg = ExecutionConfig()
+            cfg = ExecutionConfig(backend="cuda" if torch.cuda.is_available() else "cpu")
             env = probe_environment(cfg)
 
             # Minimal snr_results for testing

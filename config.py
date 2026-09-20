@@ -13,6 +13,52 @@ import torch
 import sionna
 
 
+FIXED_MC_PROFILES: Dict[str, int] = {
+    "light": 10_000,
+    "deep": 70_000,
+}
+
+
+def resolve_results_dir(
+    profile: Optional[str] = None,
+    blocks_per_seed: Optional[int] = None,
+    explicit_dir: Optional[str] = None,
+) -> str:
+    """Determine deterministic isolated results directory for fixed-budget Monte Carlo.
+
+    Hierarchy:
+    1. explicit_dir if provided and not default
+    2. profile == 'light' -> results/r0_mc_light_10k
+    3. profile == 'deep'  -> results/r0_mc_deep_70k
+    4. blocks_per_seed == 10000 -> results/r0_mc_light_10k
+    5. blocks_per_seed == 70000 -> results/r0_mc_deep_70k
+    6. custom budget N -> results/r0_mc_custom_{N//1000}k (or {N})
+    7. default fallback -> results/r0_mc_deep_70k
+    """
+    if explicit_dir is not None and explicit_dir not in (
+        "results/l2_cuda_rtx3060",
+        "results/r0_mc_deep_70k",
+    ):
+        return explicit_dir
+
+    if profile == "light":
+        return "results/r0_mc_light_10k"
+    elif profile == "deep":
+        return "results/r0_mc_deep_70k"
+
+    if blocks_per_seed is not None:
+        if blocks_per_seed == 10_000:
+            return "results/r0_mc_light_10k"
+        elif blocks_per_seed == 70_000:
+            return "results/r0_mc_deep_70k"
+        elif blocks_per_seed % 1000 == 0:
+            return f"results/r0_mc_custom_{blocks_per_seed // 1000}k"
+        else:
+            return f"results/r0_mc_custom_{blocks_per_seed}"
+
+    return "results/r0_mc_deep_70k"
+
+
 @dataclass
 class ExecutionConfig:
     """Execution configuration parameters."""
@@ -21,13 +67,27 @@ class ExecutionConfig:
     batch_blocks: int = 500            # Frozen for production Monte Carlo: 500 blocks/chunk
     cpu_threads: Optional[int] = 12    # Intra-op PyTorch CPU threads
     fresh_run: bool = True             # Do not reuse previous cache
-    results_dir: str = "results/l2_cuda_rtx3060"
+    results_dir: str = "results/r0_mc_deep_70k"
     master_seed_a: int = 20260918
     master_seed_b: int = 20260919
+    blocks_per_seed: int = 70_000      # Fixed budget per seed (default: deep profile)
+    profile: Optional[str] = "deep"    # 'light', 'deep', or None (custom)
+    checkpoint_step: int = 5000        # Checkpoint trajectory recorded every 5,000 blocks/seed
+    symbols_per_block: int = 1536
+    # Historical/deprecated fields retained for compatibility:
     initial_blocks_per_seed: int = 5000
     block_increment: int = 5000
-    max_blocks_per_seed: int = 200000
-    symbols_per_block: int = 1536
+    max_blocks_per_seed: int = 70000
+
+    def __post_init__(self) -> None:
+        if self.profile == "light" and self.blocks_per_seed == 70_000:
+            self.blocks_per_seed = FIXED_MC_PROFILES["light"]
+        elif self.profile in FIXED_MC_PROFILES and self.blocks_per_seed not in (10_000, 70_000):
+            self.profile = None
+
+        if self.results_dir in ("results/l2_cuda_rtx3060", "results/r0_mc_deep_70k"):
+            self.results_dir = resolve_results_dir(self.profile, self.blocks_per_seed)
+        self.max_blocks_per_seed = self.blocks_per_seed
 
 
 def resolve_device_and_dtype(config: ExecutionConfig) -> Tuple[torch.device, torch.dtype, torch.dtype, str]:

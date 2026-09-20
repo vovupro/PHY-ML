@@ -1,0 +1,4 @@
+transition,from_mode,to_mode,nominal_target_db,view_1_0_lower_db,view_1_0_upper_db,view_1_0_midpoint_db,view_1_0_bracket_width_db,view_1_0_cart_threshold_db,view_0_5_lower_db,view_0_5_upper_db,view_0_5_midpoint_db,view_0_5_bracket_width_db,view_0_5_cart_threshold_db,view_0_25_lower_db,view_0_25_upper_db,view_0_25_midpoint_db,view_0_25_bracket_width_db,view_0_25_cart_threshold_db,lut_shift_10_to_05_db,lut_shift_05_to_025_db,cart_shift_10_to_05_db,cart_shift_05_to_025_db
+BPSK->QPSK,BPSK,QPSK,16.75,16.0,17.0,16.5,1.0,16.5,16.5,17.0,16.75,0.5,16.75,16.75,17.0,16.875,0.25,16.875,0.25,0.125,0.25,0.125
+QPSK->16QAM,QPSK,16QAM,22.75,22.0,23.0,22.5,1.0,22.5,22.5,23.0,22.75,0.5,22.75,22.75,23.0,22.875,0.25,22.875,0.25,0.125,0.25,0.125
+16QAM->64QAM,16QAM,64QAM,28.25,28.0,29.0,28.5,1.0,28.5,28.0,28.5,28.25,0.5,28.25,28.0,28.25,28.125,0.25,28.125,-0.25,-0.125,-0.25,-0.125

@@ -1,0 +1,4 @@
+transition,from_mode,to_mode,light_lut_threshold_db,deep_lut_threshold_db,lut_threshold_shift_db,light_cart_threshold_db,deep_cart_threshold_db,cart_threshold_shift_db,notes
+BPSK->QPSK,BPSK,QPSK,16.75,16.75,0.0,16.75,16.75,0.0,Boundary exactly invariant across budgets.
+QPSK->16QAM,QPSK,16QAM,23.25,22.75,-0.5,23.25,22.75,-0.5,Boundary shifted -0.50 dB under Deep reference.
+16QAM->64QAM,16QAM,64QAM,28.25,28.25,0.0,28.25,28.25,0.0,Boundary exactly invariant across budgets.

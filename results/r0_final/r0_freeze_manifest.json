@@ -1,0 +1,115 @@
+{
+  "source_git_commit": "193d864f5570664a6bfc8714ca3c8766bd1aef8c",
+  "generated_at_utc": "2026-09-20T16:04:07.960078+00:00",
+  "output_directory": "results/r0_final",
+  "inputs": {
+    "deep_calibration_path": "results/r0_mc_deep_70k/calibration_1d_cuda_pooled.csv",
+    "deep_calibration_sha256": "bcca900dbc410d0ab274a2b893eb5c1fa478ce2ef560882828f85a1c3f27fd7e",
+    "refinement_calibration_path": "results/r0_snr_grid_refine_025/calibration_1d_cuda_pooled.csv",
+    "refinement_calibration_sha256": "f9de0818c85ab54eacdffb31d784ac62affd87594c916bfdedcdc141b253b1c2"
+  },
+  "scientific_specification": {
+    "ber_target": 0.01,
+    "confidence_k": 1.96,
+    "deep_mc_budget_blocks_per_seed": 70000,
+    "pooled_blocks_per_snr": 140000,
+    "seeds": [
+      20260918,
+      20260919
+    ],
+    "symbols_per_block": 1536,
+    "channel_model": "Slow Rayleigh Flat Block Fading",
+    "csi_model": "Perfect Coherent CSI",
+    "ground_truth_policy": "Conservative 95% Confidence Upper Bound (BER + 1.96 * SE <= 0.01)"
+  },
+  "final_dataset": {
+    "num_operating_points": 28,
+    "snr_points_db": [
+      0.0,
+      2.0,
+      4.0,
+      6.0,
+      8.0,
+      10.0,
+      12.0,
+      14.0,
+      16.0,
+      16.5,
+      16.75,
+      17.0,
+      17.5,
+      18.0,
+      20.0,
+      22.0,
+      22.5,
+      22.75,
+      23.0,
+      23.5,
+      24.0,
+      26.0,
+      28.0,
+      28.25,
+      28.5,
+      29.0,
+      29.5,
+      30.0
+    ]
+  },
+  "cart_decision_tree": {
+    "selected_depth": 3,
+    "actual_depth": 3,
+    "node_count": 7,
+    "leaf_count": 4,
+    "thresholds": [
+      16.875,
+      22.875,
+      28.125
+    ],
+    "fidelity": 1.0,
+    "achieved_100_fidelity": true,
+    "criterion": "gini",
+    "random_state": 20260918
+  },
+  "freeze_status": "PASS",
+  "freeze_gate_audit": {
+    "status": "PASS",
+    "grid_integrity_passed": true,
+    "monotonicity_passed": true,
+    "dt_fidelity_passed": true,
+    "label_uncertain_passed": true,
+    "material_overlap_passed": true,
+    "actual_snr_count": 28,
+    "expected_snr_count": 28,
+    "missing_modes": [],
+    "non_monotonic_transitions": [],
+    "label_uncertain_points": [],
+    "label_uncertain_count": 0,
+    "material_overlap_points": [],
+    "material_overlap_count": 0,
+    "non_material_overlap_points": [],
+    "non_material_overlap_count": 0,
+    "review_reasons": []
+  },
+  "policy_summary": {
+    "sampled_grid_mean_spectral_efficiency": {
+      "ground_truth_lut": 2.6785714285714284,
+      "learned_decision_tree": 2.6785714285714284,
+      "fixed_robust_bpsk": 1.0,
+      "fixed_high_tp_64qam": 6.0
+    },
+    "reliability_violation_count": {
+      "ground_truth_lut": 7,
+      "learned_decision_tree": 7,
+      "fixed_robust_bpsk": 7,
+      "fixed_high_tp_64qam": 23
+    },
+    "reliability_violation_rate": {
+      "ground_truth_lut": 0.25,
+      "learned_decision_tree": 0.25,
+      "fixed_robust_bpsk": 0.25,
+      "fixed_high_tp_64qam": 0.8214285714285714
+    },
+    "decision_tree_fidelity": 1.0,
+    "total_sampled_points": 28
+  }
+}

@@ -309,7 +309,8 @@ def run_fresh_l2_cuda_calibration(
             "final_blocks_b": blocks_done_b,
             "total_blocks_pooled": blocks_done_a + blocks_done_b,
             "elapsed_seconds": snr_elapsed,
-            "stable": True,
+            "fixed_budget_reached": True,
+            "stable": None,  # Deprecated: fixed-budget methodology does not evaluate adaptive stability
             "ceiling_hit": False,
             "checkpoints_count": checkpoint_idx,
             "checkpoint_history": checkpoint_history,
@@ -387,7 +388,7 @@ def run_fresh_l2_cuda_calibration(
                 })
 
     # Write Pooled
-    fieldnames_pooled = fieldnames + ["z_ab", "is_stable", "reliability_uncertain"]
+    fieldnames_pooled = fieldnames + ["z_ab", "fixed_budget_reached", "is_stable", "reliability_uncertain"]
     with open(csv_pooled_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames_pooled)
         writer.writeheader()
@@ -420,9 +421,54 @@ def run_fresh_l2_cuda_calibration(
                     "std_block_ber": se_pool * math.sqrt(tot_blks),
                     "se_block_ber": se_pool,
                     "z_ab": z,
-                    "is_stable": True,
+                    "fixed_budget_reached": True,
+                    "is_stable": "N/A (deprecated)",
                     "reliability_uncertain": uncertain,
                 })
+
+    # Write Checkpoint Trajectory (observational human inspection)
+    csv_trajectory_path = out_dir / "checkpoint_trajectory.csv"
+    fieldnames_trajectory = [
+        "profile",
+        "requested_blocks_per_seed",
+        "snr_db",
+        "checkpoint_idx",
+        "blocks_per_seed",
+        "pooled_blocks",
+        "mode_id",
+        "modulation",
+        "pooled_ber",
+        "pooled_se",
+        "ci95_low",
+        "ci95_high",
+        "overlaps_ber_target",
+        "z_ab",
+    ]
+    with open(csv_trajectory_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames_trajectory)
+        writer.writeheader()
+        profile_name = config.profile if config.profile else "custom"
+        for snr_db in snr_grid:
+            res = snr_results[snr_db]
+            req_budget = res.get("requested_blocks_per_seed", target_budget)
+            for chk in res["checkpoint_history"]:
+                for m in MODES:
+                    writer.writerow({
+                        "profile": profile_name,
+                        "requested_blocks_per_seed": req_budget,
+                        "snr_db": snr_db,
+                        "checkpoint_idx": chk.checkpoint_idx,
+                        "blocks_per_seed": chk.blocks_per_seed,
+                        "pooled_blocks": chk.total_blocks_pooled,
+                        "mode_id": m.mode_id,
+                        "modulation": m.modulation,
+                        "pooled_ber": chk.pooled_ber[m.mode_id],
+                        "pooled_se": chk.pooled_se[m.mode_id],
+                        "ci95_low": chk.ci_low[m.mode_id],
+                        "ci95_high": chk.ci_high[m.mode_id],
+                        "overlaps_ber_target": chk.overlaps_target[m.mode_id],
+                        "z_ab": chk.z_ab[m.mode_id],
+                    })
 
     # --- 5. Generate Markdown Report ---
     report_path = out_dir / "calibration_1d_cuda_report.md"
@@ -459,6 +505,7 @@ def run_fresh_l2_cuda_calibration(
     print(f"Saved Seed A CSV:           {csv_a_path}")
     print(f"Saved Seed B CSV:           {csv_b_path}")
     print(f"Saved Pooled CSV:           {csv_pooled_path}")
+    print(f"Saved Trajectory CSV:       {csv_trajectory_path}")
     print(f"Saved Report:               {report_path}")
     print("=" * 75, flush=True)
 
@@ -543,6 +590,7 @@ def generate_markdown_report(
         "|:--------:|:--------------------:|:---------------:|:---------:|:--------:|:-------:|:------:|",
     ]
 
+    suspicious_points = []
     for snr_db in sorted(snr_results.keys()):
         res = snr_results[snr_db]
         emp_ber = res["final_pooled_ber"][0]
@@ -551,6 +599,8 @@ def generate_markdown_report(
         diff = abs(emp_ber - theo)
         z = (diff / emp_se) if emp_se > 1e-12 else 0.0
         status = "CONSISTENT" if z <= 3.0 else "SUSPICIOUS"
+        if z > 3.0:
+            suspicious_points.append((snr_db, z))
         lines.append(
             f"| {snr_db:8.1f} | {emp_ber:20.6e} | {theo:15.6e} | {diff:9.3e} | {emp_se:8.2e} | {z:7.2f} | {status:10s} |"
         )
@@ -618,6 +668,15 @@ def generate_markdown_report(
                 f"| {snr_db:8.1f} | {m.modulation:10s} | {p_ber:10.5e} | {p_se:9.2e} | [{low:.5e}, {high:.5e}] | {ov_str:14s} | {label} |"
             )
 
+    if not suspicious_points:
+        sanity_summary_line = "- Analytical Rayleigh sanity test: **PASS** across the grid."
+    else:
+        pts_str = ", ".join([f"{snr:.1f} dB (z={z:.2f})" for snr, z in suspicious_points])
+        sanity_summary_line = (
+            f"- Analytical Rayleigh sanity test: **REVIEW** "
+            f"({len(suspicious_points)} suspicious point(s) with z > 3.0: {pts_str})."
+        )
+
     lines.extend([
         "",
         "---",
@@ -632,7 +691,7 @@ def generate_markdown_report(
         "",
         f"- **Methodology:** FIXED-BUDGET MONTE CARLO (NO ADAPTIVE STOPPING).",
         f"- All {len(snr_results)} SNR grid points evaluated strictly to the requested budget of {actual_blocks:,} blocks/seed ({actual_blocks * 2:,} pooled blocks per point).",
-        "- Analytical Rayleigh sanity test: **PASS** across the grid.",
+        sanity_summary_line,
         "- No smoothing or synthetic alterations applied to BER estimates.",
         f"- Output artifacts successfully written to `{config.results_dir}/`.",
     ])

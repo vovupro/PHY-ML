@@ -13,6 +13,7 @@ Verifies:
 10. Reports clearly state: FIXED-BUDGET MONTE CARLO, NO ADAPTIVE STOPPING, requested/actual blocks.
 11. Canonical PHY artifacts in results/l2_cuda_rtx3060_final/ are untouched.
 """
+import csv
 from pathlib import Path
 import tempfile
 import unittest
@@ -37,25 +38,31 @@ class TestFixedBudgetMonteCarlo(unittest.TestCase):
     """Test suite verifying fixed-budget Monte Carlo calibration requirements."""
 
     def setUp(self):
-        self.canonical_final_dir = Path("results/l2_cuda_rtx3060_final")
-        if self.canonical_final_dir.exists():
-            self.canonical_mtimes = {
-                p: p.stat().st_mtime for p in self.canonical_final_dir.glob("*") if p.is_file()
-            }
-        else:
-            self.canonical_mtimes = {}
+        self.canonical_dirs = [
+            Path("results/l2_cuda_rtx3060"),
+            Path("results/l2_cuda_rtx3060_final"),
+        ]
+        self.canonical_snapshots = {}
+        for d in self.canonical_dirs:
+            if d.exists():
+                self.canonical_snapshots[d] = {
+                    p: (p.stat().st_mtime, p.stat().st_size) for p in d.glob("*") if p.is_file()
+                }
+            else:
+                self.canonical_snapshots[d] = {}
 
     def tearDown(self):
-        # Verify canonical PHY artifacts were never modified by any test
-        if self.canonical_mtimes:
-            current_mtimes = {
-                p: p.stat().st_mtime for p in self.canonical_final_dir.glob("*") if p.is_file()
-            }
-            self.assertEqual(
-                self.canonical_mtimes,
-                current_mtimes,
-                "Canonical artifacts in results/l2_cuda_rtx3060_final/ were altered by tests!"
-            )
+        # Verify canonical historical PHY artifacts were never modified by any test
+        for d, snap in self.canonical_snapshots.items():
+            if snap:
+                current_snap = {
+                    p: (p.stat().st_mtime, p.stat().st_size) for p in d.glob("*") if p.is_file()
+                }
+                self.assertEqual(
+                    snap,
+                    current_snap,
+                    f"Historical canonical artifacts in {d} were altered by tests!"
+                )
 
     # -------------------------------------------------------------------------
     # 1. Profile & Override Configuration Resolution
@@ -282,11 +289,13 @@ class TestFixedBudgetMonteCarlo(unittest.TestCase):
             csv_a = Path(tmp_dir) / "calibration_1d_cuda_seed_a.csv"
             csv_b = Path(tmp_dir) / "calibration_1d_cuda_seed_b.csv"
             csv_pooled = Path(tmp_dir) / "calibration_1d_cuda_pooled.csv"
+            csv_traj = Path(tmp_dir) / "checkpoint_trajectory.csv"
             report_md = Path(tmp_dir) / "calibration_1d_cuda_report.md"
 
             self.assertTrue(csv_a.exists())
             self.assertTrue(csv_b.exists())
             self.assertTrue(csv_pooled.exists())
+            self.assertTrue(csv_traj.exists())
             self.assertTrue(report_md.exists())
 
     # -------------------------------------------------------------------------
@@ -315,7 +324,7 @@ class TestFixedBudgetMonteCarlo(unittest.TestCase):
                     "final_blocks_b": 70_000,
                     "total_blocks_pooled": 140_000,
                     "checkpoints_count": 14,
-                    "stable": True,
+                    "fixed_budget_reached": True,
                     "final_stats_a": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
                     "final_stats_b": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
                     "final_z_ab": {m: 0.5 for m in range(4)},
@@ -345,6 +354,249 @@ class TestFixedBudgetMonteCarlo(unittest.TestCase):
             self.assertIn("Target Overlap", report_text)
             self.assertIn("95% Confidence Interval", report_text)
             self.assertNotIn("Predefined 3-criterion rule", report_text)
+
+    # -------------------------------------------------------------------------
+    # 5. Patch Audit Verifications (Trajectory CSV, Semantics, Sanity Summary)
+    # -------------------------------------------------------------------------
+
+    def test_11_checkpoint_trajectory_csv_and_all_four_modes(self):
+        """11. checkpoint_trajectory.csv exists with 14 columns and all 4 modes at every checkpoint."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = ExecutionConfig(
+                backend="cpu",
+                profile="light",
+                batch_blocks=500,
+                checkpoint_step=5000,
+                results_dir=tmp_dir,
+            )
+
+            with patch("calibration_l2_cuda.BatchPHYEngine") as MockEngine:
+                mock_inst = MockEngine.return_value
+                mock_inst.evaluate_chunk.side_effect = lambda snr, cur_b, f, n, b: self._make_mock_chunk_metrics(cur_b)
+                run_fresh_l2_cuda_calibration(config=cfg, snrs=(18.0,))
+
+            traj_path = Path(tmp_dir) / "checkpoint_trajectory.csv"
+            self.assertTrue(traj_path.exists(), "checkpoint_trajectory.csv does not exist!")
+
+            expected_columns = [
+                "profile",
+                "requested_blocks_per_seed",
+                "snr_db",
+                "checkpoint_idx",
+                "blocks_per_seed",
+                "pooled_blocks",
+                "mode_id",
+                "modulation",
+                "pooled_ber",
+                "pooled_se",
+                "ci95_low",
+                "ci95_high",
+                "overlaps_ber_target",
+                "z_ab",
+            ]
+
+            with open(traj_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                self.assertEqual(reader.fieldnames, expected_columns)
+                rows = list(reader)
+
+            # Light profile: 10,000 blocks / 5,000 step = 2 checkpoints
+            # 2 checkpoints * 4 modulations = 8 rows
+            self.assertEqual(len(rows), 8)
+
+            # Group rows by (snr_db, checkpoint_idx)
+            grouped = {}
+            for r in rows:
+                key = (float(r["snr_db"]), int(r["checkpoint_idx"]))
+                grouped.setdefault(key, []).append(r)
+
+            for key, group in grouped.items():
+                self.assertEqual(len(group), 4, f"Checkpoint {key} must have exactly 4 modulation rows!")
+                modes_present = {r["modulation"] for r in group}
+                mode_ids_present = {int(r["mode_id"]) for r in group}
+                self.assertEqual(modes_present, {"BPSK", "QPSK", "16QAM", "64QAM"})
+                self.assertEqual(mode_ids_present, {0, 1, 2, 3})
+
+    def test_12_deep_profile_fourteen_checkpoints_and_trajectory(self):
+        """12. Deep 70k profile with 5k step implies exactly 14 checkpoints and 56 rows per SNR."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = ExecutionConfig(
+                backend="cpu",
+                profile="deep",
+                batch_blocks=500,
+                checkpoint_step=5000,
+                results_dir=tmp_dir,
+            )
+
+            with patch("calibration_l2_cuda.BatchPHYEngine") as MockEngine:
+                mock_inst = MockEngine.return_value
+                mock_inst.evaluate_chunk.side_effect = lambda snr, cur_b, f, n, b: self._make_mock_chunk_metrics(cur_b)
+                res = run_fresh_l2_cuda_calibration(config=cfg, snrs=(18.0,))
+
+            snr_res = res["snr_results"][18.0]
+            self.assertEqual(snr_res["checkpoints_count"], 14)
+            self.assertEqual(len(snr_res["checkpoint_history"]), 14)
+
+            expected_depths = [i * 5000 for i in range(1, 15)]
+            actual_depths = [chk.blocks_per_seed for chk in snr_res["checkpoint_history"]]
+            self.assertEqual(actual_depths, expected_depths)
+
+            traj_path = Path(tmp_dir) / "checkpoint_trajectory.csv"
+            with open(traj_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            # 14 checkpoints * 4 modulations = 56 rows
+            self.assertEqual(len(rows), 56)
+            chk_indices = {int(r["checkpoint_idx"]) for r in rows}
+            self.assertEqual(chk_indices, set(range(1, 15)))
+
+    def test_13_no_stale_stability_semantics(self):
+        """13. Ensure no stale is_stable=True / stable=True semantics remain in results or CSV."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = ExecutionConfig(
+                backend="cpu",
+                profile="light",
+                batch_blocks=500,
+                checkpoint_step=5000,
+                results_dir=tmp_dir,
+            )
+
+            with patch("calibration_l2_cuda.BatchPHYEngine") as MockEngine:
+                mock_inst = MockEngine.return_value
+                mock_inst.evaluate_chunk.side_effect = lambda snr, cur_b, f, n, b: self._make_mock_chunk_metrics(cur_b)
+                res = run_fresh_l2_cuda_calibration(config=cfg, snrs=(18.0,))
+
+            snr_res = res["snr_results"][18.0]
+            # Must report explicit fixed_budget_reached=True
+            self.assertTrue(snr_res.get("fixed_budget_reached"))
+            # Must NOT report stable=True
+            self.assertNotEqual(snr_res.get("stable"), True)
+            self.assertIsNone(snr_res.get("stable"))
+
+            # Check pooled CSV
+            csv_pooled = Path(tmp_dir) / "calibration_1d_cuda_pooled.csv"
+            with open(csv_pooled, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                pooled_rows = list(reader)
+
+            self.assertGreater(len(pooled_rows), 0)
+            for row in pooled_rows:
+                self.assertEqual(row.get("fixed_budget_reached"), "True")
+                self.assertNotEqual(row.get("is_stable"), "True")
+                self.assertNotEqual(row.get("is_stable"), True)
+                self.assertIn(row.get("is_stable"), ("N/A (deprecated)", None, ""))
+
+    def test_14_historical_canonical_directories_untouched(self):
+        """14. Execution must never touch historical canonical directories."""
+        dir_1 = Path("results/l2_cuda_rtx3060")
+        dir_2 = Path("results/l2_cuda_rtx3060_final")
+
+        snap_before = {}
+        for d in [dir_1, dir_2]:
+            if d.exists():
+                snap_before[d] = {
+                    p.name: (p.stat().st_mtime, p.stat().st_size)
+                    for p in d.glob("*") if p.is_file()
+                }
+
+        # Run calibration in an isolated temporary directory
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = ExecutionConfig(
+                backend="cpu",
+                profile="light",
+                batch_blocks=500,
+                checkpoint_step=5000,
+                results_dir=tmp_dir,
+            )
+            with patch("calibration_l2_cuda.BatchPHYEngine") as MockEngine:
+                mock_inst = MockEngine.return_value
+                mock_inst.evaluate_chunk.side_effect = lambda snr, cur_b, f, n, b: self._make_mock_chunk_metrics(cur_b)
+                run_fresh_l2_cuda_calibration(config=cfg, snrs=(14.0,))
+
+        # Verify neither directory changed
+        for d, before in snap_before.items():
+            after = {
+                p.name: (p.stat().st_mtime, p.stat().st_size)
+                for p in d.glob("*") if p.is_file()
+            }
+            self.assertEqual(before, after, f"Directory {d} was modified!")
+
+    def test_15_analytical_summary_review_on_suspicious_point(self):
+        """15. Analytical summary dynamically prints PASS or REVIEW based on BPSK z-scores."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = ExecutionConfig(
+                backend="cpu",
+                profile="light",
+                blocks_per_seed=10_000,
+                results_dir=tmp_dir,
+            )
+            env = probe_environment(cfg)
+
+            # Scenario A: Consistent point (z <= 3.0) -> PASS
+            pass_report_path = Path(tmp_dir) / "report_pass.md"
+            snr_results_pass = {
+                18.0: {
+                    # Theoretical BPSK at 18 dB is ~0.00392
+                    "final_pooled_ber": {0: 0.00392, 1: 0.008, 2: 0.03, 3: 0.08},
+                    "final_pooled_se": {0: 0.0003, 1: 0.0005, 2: 0.001, 3: 0.002},
+                    "requested_blocks_per_seed": 10_000,
+                    "actual_blocks_per_seed": 10_000,
+                    "final_blocks_a": 10_000,
+                    "final_blocks_b": 10_000,
+                    "total_blocks_pooled": 20_000,
+                    "checkpoints_count": 2,
+                    "fixed_budget_reached": True,
+                    "final_stats_a": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
+                    "final_stats_b": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
+                    "final_z_ab": {m: 0.5 for m in range(4)},
+                }
+            }
+            generate_markdown_report(
+                snr_results=snr_results_pass,
+                env=env,
+                config=cfg,
+                warmup_time=0.1,
+                total_mc_time=1.0,
+                total_blocks_simulated=20_000,
+                output_path=pass_report_path,
+            )
+            pass_text = pass_report_path.read_text(encoding="utf-8")
+            self.assertIn("Analytical Rayleigh sanity test: **PASS** across the grid.", pass_text)
+            self.assertNotIn("**REVIEW**", pass_text)
+
+            # Scenario B: Suspicious point (z > 3.0) -> REVIEW with details
+            review_report_path = Path(tmp_dir) / "report_review.md"
+            snr_results_review = {
+                18.0: {
+                    # Empirical BER is 0.020 (far from ~0.00392, diff=0.016, SE=0.001 -> z=16.0)
+                    "final_pooled_ber": {0: 0.020, 1: 0.008, 2: 0.03, 3: 0.08},
+                    "final_pooled_se": {0: 0.001, 1: 0.0005, 2: 0.001, 3: 0.002},
+                    "requested_blocks_per_seed": 10_000,
+                    "actual_blocks_per_seed": 10_000,
+                    "final_blocks_a": 10_000,
+                    "final_blocks_b": 10_000,
+                    "total_blocks_pooled": 20_000,
+                    "checkpoints_count": 2,
+                    "fixed_budget_reached": True,
+                    "final_stats_a": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
+                    "final_stats_b": {m: type("Stats", (), {"ber": 0.01})() for m in range(4)},
+                    "final_z_ab": {m: 0.5 for m in range(4)},
+                }
+            }
+            generate_markdown_report(
+                snr_results=snr_results_review,
+                env=env,
+                config=cfg,
+                warmup_time=0.1,
+                total_mc_time=1.0,
+                total_blocks_simulated=20_000,
+                output_path=review_report_path,
+            )
+            review_text = review_report_path.read_text(encoding="utf-8")
+            self.assertNotIn("Analytical Rayleigh sanity test: **PASS** across the grid.", review_text)
+            self.assertIn("Analytical Rayleigh sanity test: **REVIEW**", review_text)
+            self.assertIn("1 suspicious point(s) with z > 3.0: 18.0 dB", review_text)
 
 
 if __name__ == "__main__":

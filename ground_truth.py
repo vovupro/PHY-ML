@@ -6,7 +6,7 @@ without re-running the PHY layer.
 Architecture:
     calibration_1d_rayleigh.csv
                 ↓
-    Ground-Truth Decision Engine (BER <= BER_target -> argmax spectral efficiency)
+    Ground-Truth Decision Engine (CI-based eligibility: BER + 1.96 * SE <= BER_target -> argmax spectral efficiency)
                 ↓
     results/ground_truth_1d.csv
                 ↓
@@ -25,7 +25,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
-from metrics import BER_TARGET, CONFIDENCE_K, is_reliability_uncertain
+
+BER_TARGET: float = 0.01
+CONFIDENCE_K: float = 1.96
+
+
+def is_reliability_uncertain(
+    ber: float,
+    se: float,
+    target: float = BER_TARGET,
+    k: float = CONFIDENCE_K,
+) -> bool:
+    """Determine whether the empirical 95% confidence interval overlaps BER_target.
+
+    Exact criterion:
+        ci_low <= target <= ci_high
+    where ci_low = max(0.0, ber - k*se) and ci_high = ber + k*se.
+    Heuristic windows such as [0.009, 0.011] or [0.008, 0.012] are strictly excluded.
+    """
+    ci_low = max(0.0, float(ber - k * se))
+    ci_high = float(ber + k * se)
+    return ci_low <= float(target) <= ci_high
 
 
 MODULATION_BPS: Dict[str, int] = {
@@ -571,7 +591,7 @@ def generate_l3_report(
     if fallback_rows:
         lines.append(f"### Fallback Events ({len(fallback_rows)} points):")
         for fr in fallback_rows:
-            lines.append(f"- **SNR = {fr.snr_db:.1f} dB**: No candidate modulation satisfied $\\text{{BER}} \\le {config.ber_target:.4f}$. Fallback policy `{config.fallback_policy}` selected **{fr.best_mode}**.")
+            lines.append(f"- **SNR = {fr.snr_db:.1f} dB**: No candidate modulation satisfied upper 95% CI ($\\text{{BER}} + {config.confidence_k:.2f} \\cdot \\text{{SE}} \\le {config.ber_target:.4f}$). Fallback policy `{config.fallback_policy}` selected **{fr.best_mode}**.")
     else:
         lines.append("### Fallback Events: None (at least one mode satisfied the reliability constraint at all SNR points).")
 

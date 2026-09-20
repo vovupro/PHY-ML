@@ -26,18 +26,18 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from calibration_l2_cuda import GRID_25_POINTS
-from metrics import BER_TARGET, CONFIDENCE_K, is_reliability_uncertain
-from phy_engine import MODES
 from ground_truth import (
+    BER_TARGET,
+    CONFIDENCE_K,
     GroundTruthConfig,
     GroundTruthRow,
     LookupTable1D,
     MODULATION_BPS,
     compute_ground_truth,
+    is_reliability_uncertain,
     load_calibration_csv,
 )
-from cart_1d import CART1DClassifier
+from cart_1d import CART1DClassifier, TreeMetrics
 
 
 def extract_report_metadata(report_path: Path) -> Dict[str, Any]:
@@ -59,6 +59,61 @@ def extract_report_metadata(report_path: Path) -> Dict[str, Any]:
     if m_blks:
         meta["total_blocks"] = int(m_blks.group(1).replace(",", ""))
     return meta
+
+
+def extract_modes_from_csv(csv_path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """Extract ordered unique modulation modes directly from calibration CSV.
+
+    Ensures complete post-processing isolation without importing phy_engine or calibration_l2_cuda.
+    """
+    path = Path(csv_path)
+    modes_dict: Dict[str, Dict[str, Any]] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            mod = str(row["modulation"]).strip()
+            if mod not in modes_dict:
+                mid = int(row["mode_id"]) if "mode_id" in row and row["mode_id"] != "" else len(modes_dict)
+                bps = int(row["bits_per_symbol"]) if "bits_per_symbol" in row and row["bits_per_symbol"] != "" else MODULATION_BPS.get(mod, 1)
+                modes_dict[mod] = {
+                    "mode_id": mid,
+                    "modulation": mod,
+                    "bits_per_symbol": bps,
+                }
+    return sorted(modes_dict.values(), key=lambda x: x["mode_id"])
+
+
+def select_optimal_cart_depth(
+    snrs: Sequence[float],
+    labels: Sequence[str],
+    min_depth: int = 1,
+    max_depth: int = 5,
+    random_state: int = 20260918,
+) -> Tuple[CART1DClassifier, TreeMetrics]:
+    """Sweep depth 1..5 independently to choose smallest depth achieving 100% fidelity.
+
+    This performs model selection (NOT ablation) independently on each budget profile.
+    If multiple depths achieve 100% fidelity (accuracy == 1.0), the smallest depth is chosen
+    to maintain parsimony and avoid unnecessary structural complexity.
+    If 100% fidelity is not achievable within the sweep, the smallest depth achieving
+    maximal fidelity is selected.
+    """
+    candidates: List[Tuple[int, CART1DClassifier, TreeMetrics]] = []
+    for d in range(min_depth, max_depth + 1):
+        clf = CART1DClassifier(max_depth=d, random_state=random_state)
+        clf.fit(snrs, labels)
+        metrics = clf.evaluate(snrs, labels)
+        candidates.append((d, clf, metrics))
+
+    perfect = [c for c in candidates if c[2].accuracy >= 1.0 - 1e-9]
+    if perfect:
+        chosen = min(perfect, key=lambda c: c[0])
+    else:
+        max_acc = max(c[2].accuracy for c in candidates)
+        best_acc_candidates = [c for c in candidates if abs(c[2].accuracy - max_acc) < 1e-9]
+        chosen = min(best_acc_candidates, key=lambda c: c[0])
+
+    return chosen[1], chosen[2]
 
 
 def run_budget_comparison(
@@ -86,6 +141,9 @@ def run_budget_comparison(
     light_cal = load_calibration_csv(light_csv)
     deep_cal = load_calibration_csv(deep_csv)
 
+    # Derive modes directly from input CSV
+    modes = extract_modes_from_csv(light_csv)
+
     # Extract optional report timing metadata
     light_meta = extract_report_metadata(light_p / "calibration_1d_cuda_report.md")
     deep_meta = extract_report_metadata(deep_p / "calibration_1d_cuda_report.md")
@@ -107,14 +165,16 @@ def run_budget_comparison(
     light_gt_map = {r.snr_db: r for r in light_gt}
     deep_gt_map = {r.snr_db: r for r in deep_gt}
 
-    # 1. Generate Point-by-Point Budget Comparison (100 rows: 25 SNRs x 4 modes)
+    # 1. Generate Point-by-Point Budget Comparison (row per SNR x mode)
     mc_budget_rows: List[Dict[str, Any]] = []
     se_reductions: List[float] = []
 
     for snr in common_snrs:
-        for m in MODES:
-            l_dict = light_cal[snr].get(m.modulation, {})
-            d_dict = deep_cal[snr].get(m.modulation, {})
+        for m in modes:
+            mod_name = m["modulation"]
+            mode_id = m["mode_id"]
+            l_dict = light_cal[snr].get(mod_name, {})
+            d_dict = deep_cal[snr].get(mod_name, {})
 
             l_ber = float(l_dict.get("ber", 1.0))
             d_ber = float(d_dict.get("ber", 1.0))
@@ -151,8 +211,8 @@ def run_budget_comparison(
 
             mc_budget_rows.append({
                 "snr_db": snr,
-                "mode_id": m.mode_id,
-                "modulation": m.modulation,
+                "mode_id": mode_id,
+                "modulation": mod_name,
                 "light_blocks_per_seed": l_blks // 2,
                 "deep_blocks_per_seed": d_blks // 2,
                 "light_pooled_blocks": l_blks,
@@ -237,7 +297,7 @@ def run_budget_comparison(
         writer.writeheader()
         writer.writerows(label_rows)
 
-    # 3. Derive 1D LUT & Train CART on both datasets
+    # 3. Derive 1D LUT & Perform CART Depth Model Selection on both datasets independently
     light_lut = LookupTable1D.from_ground_truth(light_gt)
     deep_lut = LookupTable1D.from_ground_truth(deep_gt)
 
@@ -246,17 +306,10 @@ def run_budget_comparison(
     deep_snrs = [r.snr_db for r in deep_gt]
     deep_labels = [r.best_mode for r in deep_gt]
 
-    clf_light = CART1DClassifier(max_depth=3, random_state=20260918)
-    clf_light.fit(light_snrs, light_labels)
-    cart_metrics_light = clf_light.evaluate(light_snrs, light_labels)
-
-    clf_deep = CART1DClassifier(max_depth=3, random_state=20260918)
-    clf_deep.fit(deep_snrs, deep_labels)
-    cart_metrics_deep = clf_deep.evaluate(deep_snrs, deep_labels)
+    clf_light, cart_metrics_light = select_optimal_cart_depth(light_snrs, light_labels)
+    clf_deep, cart_metrics_deep = select_optimal_cart_depth(deep_snrs, deep_labels)
 
     # Decision tree cross-fidelity
-    light_preds_on_deep = clf_light.predict(deep_snrs)
-    deep_preds_on_light = clf_deep.predict(light_snrs)
     tree_agreement_count = sum(p1 == p2 for p1, p2 in zip(clf_light.predict(common_snrs), clf_deep.predict(common_snrs)))
     tree_agreement_rate = (tree_agreement_count / len(common_snrs)) if common_snrs else 1.0
 
@@ -341,6 +394,8 @@ def run_budget_comparison(
     print(f"[Budget Study] Saved Label Comparison CSV:      {csv_label_path}")
     print(f"[Budget Study] Saved Transition Comparison CSV: {csv_transition_path}")
     print(f"[Budget Study] Saved Markdown Report:           {report_path}")
+    print(f"[Budget Study] Light CART Model Selection: Selected Depth={cart_metrics_light.max_depth_param}, Actual Depth={cart_metrics_light.actual_depth}, Fidelity={cart_metrics_light.accuracy * 100:.1f}%, Thresholds={cart_metrics_light.learned_thresholds}")
+    print(f"[Budget Study] Deep CART Model Selection:  Selected Depth={cart_metrics_deep.max_depth_param}, Actual Depth={cart_metrics_deep.actual_depth}, Fidelity={cart_metrics_deep.accuracy * 100:.1f}%, Thresholds={cart_metrics_deep.learned_thresholds}")
 
     return {
         "mc_budget_rows": mc_budget_rows,
@@ -348,6 +403,18 @@ def run_budget_comparison(
         "transition_rows": transition_rows,
         "flips_count": flips_count,
         "tree_agreement_rate": tree_agreement_rate,
+        "cart_light": {
+            "selected_depth": cart_metrics_light.max_depth_param,
+            "actual_depth": cart_metrics_light.actual_depth,
+            "fidelity": cart_metrics_light.accuracy,
+            "thresholds": cart_metrics_light.learned_thresholds,
+        },
+        "cart_deep": {
+            "selected_depth": cart_metrics_deep.max_depth_param,
+            "actual_depth": cart_metrics_deep.actual_depth,
+            "fidelity": cart_metrics_deep.accuracy,
+            "thresholds": cart_metrics_deep.learned_thresholds,
+        },
         "output_dir": str(out_p),
     }
 
@@ -458,8 +525,9 @@ def generate_study_markdown_report(
     lines.extend([
         "",
         "### Q5: Does the learned Decision Tree policy change?",
-        f"- **Light-Trained CART Tree:** Depth = `{cart_light.actual_depth}`, Leaves = `{cart_light.leaf_count}`, Training Accuracy = `{cart_light.accuracy * 100:.1f}%`, Thresholds = `{cart_light.learned_thresholds}`",
-        f"- **Deep-Trained CART Tree:** Depth = `{cart_deep.actual_depth}`, Leaves = `{cart_deep.leaf_count}`, Training Accuracy = `{cart_deep.accuracy * 100:.1f}%`, Thresholds = `{cart_deep.learned_thresholds}`",
+        "- **Model Selection Methodology:** Depth was swept independently over $d \\in [1, 5]$ for Light and Deep; the smallest depth achieving 100% fidelity to each profile's ground-truth labels was selected (model selection, NOT ablation).",
+        f"- **Light-Trained CART Tree:** Selected Depth = `{cart_light.max_depth_param}`, Actual Depth = `{cart_light.actual_depth}`, Fidelity = `{cart_light.accuracy * 100:.1f}%` ({cart_light.accuracy:.4f}), Thresholds = `{cart_light.learned_thresholds}`, Leaf Nodes = `{cart_light.leaf_count}`",
+        f"- **Deep-Trained CART Tree:** Selected Depth = `{cart_deep.max_depth_param}`, Actual Depth = `{cart_deep.actual_depth}`, Fidelity = `{cart_deep.accuracy * 100:.1f}%` ({cart_deep.accuracy:.4f}), Thresholds = `{cart_deep.learned_thresholds}`, Leaf Nodes = `{cart_deep.leaf_count}`",
         f"- **Cross-Policy Agreement:** Predictions between Light-trained and Deep-trained decision trees agree on **{tree_agreement_rate * 100:.1f}%** of the evaluation grid points.",
         "",
         "### Q6: What compute cost is paid?",

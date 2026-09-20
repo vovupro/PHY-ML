@@ -18,17 +18,34 @@ import csv
 import math
 from pathlib import Path
 import tempfile
+from typing import Any, Dict, List, Tuple
 import unittest
 from unittest.mock import patch
 
-from calibration_l2_cuda import GRID_25_POINTS
-from phy_engine import MODES
-from metrics import BER_TARGET, CONFIDENCE_K
 from ground_truth import (
+    BER_TARGET,
+    CONFIDENCE_K,
     GroundTruthConfig,
     compute_ground_truth,
 )
-from compare_mc_budgets import run_budget_comparison
+from compare_mc_budgets import (
+    run_budget_comparison,
+    select_optimal_cart_depth,
+)
+
+TEST_GRID_25_POINTS: Tuple[float, ...] = (
+    0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0,
+    16.0, 16.5, 17.0, 17.5, 18.0, 20.0,
+    22.0, 22.5, 23.0, 23.5, 24.0, 26.0,
+    28.0, 28.5, 29.0, 29.5, 30.0,
+)
+
+TEST_MODES: Tuple[Dict[str, Any], ...] = (
+    {"mode_id": 0, "modulation": "BPSK", "bits_per_symbol": 1},
+    {"mode_id": 1, "modulation": "QPSK", "bits_per_symbol": 2},
+    {"mode_id": 2, "modulation": "16QAM", "bits_per_symbol": 4},
+    {"mode_id": 3, "modulation": "64QAM", "bits_per_symbol": 6},
+)
 
 
 class TestMCBudgetStudy(unittest.TestCase):
@@ -123,14 +140,18 @@ class TestMCBudgetStudy(unittest.TestCase):
         ]
 
         rows = []
-        for snr in GRID_25_POINTS:
-            for m in MODES:
+        for snr in TEST_GRID_25_POINTS:
+            for m in TEST_MODES:
+                mid = m["mode_id"]
+                mod = m["modulation"]
+                bps = m["bits_per_symbol"]
+
                 # Nominal synthetic BER functions
-                if m.mode_id == 0:  # BPSK
+                if mid == 0:  # BPSK
                     ber = 0.5 * math.exp(-0.25 * (10 ** (snr / 10.0)))
-                elif m.mode_id == 1:  # QPSK
+                elif mid == 1:  # QPSK
                     ber = 0.5 * math.exp(-0.12 * (10 ** (snr / 10.0)))
-                elif m.mode_id == 2:  # 16QAM
+                elif mid == 2:  # 16QAM
                     ber = 0.5 * math.exp(-0.020 * (10 ** (snr / 10.0)))
                 else:  # 64QAM
                     ber = 0.5 * math.exp(-0.0050 * (10 ** (snr / 10.0)))
@@ -143,18 +164,18 @@ class TestMCBudgetStudy(unittest.TestCase):
                 # At 23.0 dB for 16QAM:
                 # In Light: ber=0.0095, se=0.0010 -> upper CI = 0.01146 > 0.0100 (ineligible)
                 # In Deep:  ber=0.0095, se=0.0001 -> upper CI = 0.00970 <= 0.0100 (eligible)
-                if inject_flip_at_23 and abs(snr - 23.0) < 1e-3 and m.mode_id == 2:
+                if inject_flip_at_23 and abs(snr - 23.0) < 1e-3 and mid == 2:
                     ber = 0.0095
                     se = 0.0010 if num_blocks <= 20000 else 0.0001
 
                 ci_hw = 1.96 * se
                 uncertain = (ber - ci_hw <= 0.01 <= ber + ci_hw)
-                tot_bits = num_blocks * 1536 * m.bits_per_symbol
+                tot_bits = num_blocks * 1536 * bps
 
                 rows.append({
-                    "mode_id": m.mode_id,
-                    "modulation": m.modulation,
-                    "bits_per_symbol": m.bits_per_symbol,
+                    "mode_id": mid,
+                    "modulation": mod,
+                    "bits_per_symbol": bps,
                     "snr_db": snr,
                     "num_blocks": num_blocks,
                     "total_bits": tot_bits,
@@ -367,6 +388,42 @@ class TestMCBudgetStudy(unittest.TestCase):
             self.assertGreater(len(measured_reductions), 0)
             mean_reduction = sum(measured_reductions) / len(measured_reductions)
             self.assertAlmostEqual(mean_reduction, expected_reduction, delta=0.5)
+
+    def test_09_post_processing_isolation_no_sionna_or_phy_imports(self):
+        """Verify compare_mc_budgets does not import Sionna, BatchPHYEngine, calibration_l2_cuda, or phy_engine."""
+        import subprocess
+        import sys
+
+        code = (
+            "import compare_mc_budgets, sys\n"
+            "assert 'sionna' not in sys.modules, 'sionna illegally loaded'\n"
+            "assert 'calibration_l2_cuda' not in sys.modules, 'calibration_l2_cuda illegally loaded'\n"
+            "assert 'phy_engine' not in sys.modules, 'phy_engine illegally loaded'\n"
+            "assert 'cuda_engine' not in sys.modules, 'cuda_engine illegally loaded'\n"
+            "print('ISOLATION_OK')"
+        )
+        res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"Isolation check failed with stderr:\n{res.stderr}")
+        self.assertIn("ISOLATION_OK", res.stdout)
+
+    def test_10_cart_depth_model_selection(self):
+        """Verify select_optimal_cart_depth sweeps 1..5 and chooses smallest depth with 100% fidelity."""
+        # 1. Two-class dataset: depth 1 must achieve 100% fidelity and be selected
+        snrs_2class = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+        labels_2class = ["BPSK", "BPSK", "BPSK", "BPSK", "QPSK", "QPSK", "QPSK", "QPSK"]
+        clf_2c, m_2c = select_optimal_cart_depth(snrs_2class, labels_2class)
+        self.assertEqual(m_2c.max_depth_param, 1, "Smallest depth for 2 classes must be 1")
+        self.assertEqual(m_2c.actual_depth, 1)
+        self.assertEqual(m_2c.accuracy, 1.0)
+        self.assertEqual(len(m_2c.learned_thresholds), 1)
+
+        # 2. Four-class dataset: depth 3 must achieve 100% fidelity and be selected over depth 4 and 5
+        snrs_4class = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0]
+        labels_4class = ["BPSK", "BPSK", "QPSK", "QPSK", "16QAM", "16QAM", "64QAM", "64QAM"]
+        clf_4c, m_4c = select_optimal_cart_depth(snrs_4class, labels_4class)
+        self.assertEqual(m_4c.max_depth_param, 3, "Smallest depth for 4 classes must be 3")
+        self.assertEqual(m_4c.accuracy, 1.0)
+        self.assertEqual(len(m_4c.learned_thresholds), 3)
 
 
 if __name__ == "__main__":

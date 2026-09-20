@@ -1,0 +1,100 @@
+{
+  "title": "PHY-ML R1 LDPC Coded PHY Pilot Verification Manifest",
+  "generated_at_utc": "2026-09-20T16:14:19.032218+00:00",
+  "source_git_commit": "193d864f5570664a6bfc8714ca3c8766bd1aef8c",
+  "runtime_seconds": 10.636079400006565,
+  "scientific_specification": {
+    "channel_model": "Slow Rayleigh Flat Block Fading (E[|h|^2] = 1.0)",
+    "csi_knowledge": "Perfect Coherent CSI (h known at receiver)",
+    "equalization": "y_eq = y / h, N0_eff = N0 / |h|^2",
+    "demapping": "Soft APP Demapping (no hard decisions prior to LDPC decoder)",
+    "fec_scheme": "5G NR LDPC (3GPP TS 38.212)",
+    "decoder_algorithm": "Belief Propagation (boxplus-phi, 15 iterations)",
+    "symbols_per_block": 1536,
+    "simulation_axis": "Nominal Es/N0 (dB) [Es = 1, N0 = 1 / 10^(SNR/10)]",
+    "derived_eb_n0_formula": "(Eb/N0)_dB = (Es/N0)_dB - 10 * log10(eta)",
+    "independent_statistical_unit": "Codeword / Transport-Block (1 codeword per Rayleigh fading block)"
+  },
+  "pilot_configuration": {
+    "actions": [
+      {
+        "name": "BPSK-1/2",
+        "modulation": "BPSK",
+        "code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "bits_per_symbol": 1,
+        "spectral_efficiency": 0.5
+      },
+      {
+        "name": "QPSK-1/2",
+        "modulation": "QPSK",
+        "code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "bits_per_symbol": 2,
+        "spectral_efficiency": 1.0
+      },
+      {
+        "name": "QPSK-2/3",
+        "modulation": "QPSK",
+        "code_rate": 0.6666666666666666,
+        "code_rate_str": "2/3",
+        "bits_per_symbol": 2,
+        "spectral_efficiency": 1.3333333333333333
+      },
+      {
+        "name": "16QAM-1/2",
+        "modulation": "16QAM",
+        "code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "bits_per_symbol": 4,
+        "spectral_efficiency": 2.0
+      },
+      {
+        "name": "16QAM-3/4",
+        "modulation": "16QAM",
+        "code_rate": 0.75,
+        "code_rate_str": "3/4",
+        "bits_per_symbol": 4,
+        "spectral_efficiency": 3.0
+      },
+      {
+        "name": "64QAM-1/2",
+        "modulation": "64QAM",
+        "code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "bits_per_symbol": 6,
+        "spectral_efficiency": 3.0
+      },
+      {
+        "name": "64QAM-2/3",
+        "modulation": "64QAM",
+        "code_rate": 0.6666666666666666,
+        "code_rate_str": "2/3",
+        "bits_per_symbol": 6,
+        "spectral_efficiency": 4.0
+      },
+      {
+        "name": "64QAM-3/4",
+        "modulation": "64QAM",
+        "code_rate": 0.75,
+        "code_rate_str": "3/4",
+        "bits_per_symbol": 6,
+        "spectral_efficiency": 4.5
+      }
+    ],
+    "snrs_db": [
+      10.0,
+      18.0,
+      26.0
+    ],
+    "num_blocks_per_point": 20,
+    "total_evaluations": 24,
+    "master_seed": 20260920,
+    "precision": "double",
+    "device": "cpu"
+  },
+  "output_files": {
+    "results_csv": "r1_pilot_results.csv",
+    "report_md": "r1_pilot_report.md"
+  }
+}

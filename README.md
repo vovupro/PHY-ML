@@ -35,9 +35,9 @@ The project separates **experimental control** from **canonical PHY primitives**
 
 ---
 
-## 📌 Current Stage: R0 Canonical Frozen Research Root
+## 📌 Current Stage: R0 Canonical Freeze Candidate (Finalization Stage)
 
-`PHY-ML R0` represents the finalized, frozen uncoded baseline root for adaptive modulation and coding (AMC) link adaptation:
+`PHY-ML R0` represents the canonical uncoded baseline root candidate currently undergoing final packaging and freeze verification for adaptive modulation and coding (AMC) link adaptation:
 - **Physical Channel:** Slow Rayleigh flat block fading ($\mathbb{E}[|h|^2] = 1.0$, held strictly constant over 1536 complex symbols/block, independent realizations between blocks).
 - **CSI Knowledge:** Perfect coherent channel state information (CSI) at the receiver.
 - **State Space:** $s = [\text{SNR}_{\text{dB}}]$ (nominal setup $E_s/N_0$).
@@ -46,6 +46,9 @@ The project separates **experimental control** from **canonical PHY primitives**
 - **Ground Truth Policy:** Conservative 95% confidence upper bound ($\hat{\text{BER}} + 1.96 \cdot \text{SE} \le \text{BER}_{\text{target}}$ with $\text{BER}_{\text{target}} = 0.0100$).
 - **Local Transition Resolution:** Targeted 0.25-dB refinement at candidate mode switching boundaries (16.75 dB, 22.75 dB, 28.25 dB), forming a unified 28-point operating grid.
 - **Decision Tree Architecture:** Classification Decision Tree (CART) trained via minimum-depth model selection ($d \in [1, 5]$) to maximize policy parsimony and transparency.
+
+> [!NOTE]
+> **Freeze Certification Governance:** R0 remains designated as a **Freeze Candidate** until the canonical freeze gate (`package_r0_freeze.py`) executes on the production calibration datasets and certifies an unambiguous `PASS` status within `results/r0_final/r0_freeze_manifest.json` and `results/r0_final/r0_final_report.md`.
 
 ---
 

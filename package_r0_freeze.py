@@ -399,40 +399,106 @@ def run_freeze_gate(
             f"Decision Tree fidelity below 100%: achieved {dt_metrics.accuracy * 100:.2f}%."
         )
 
-    # 4. Target-Overlapping Confidence Intervals & Label Uncertainty Audit
-    overlapping_ci_modes: List[Dict[str, Any]] = []
+    # 4. Label Uncertainty Audit (from GroundTruthRow.label_uncertain)
+    label_uncertain_points: List[Dict[str, Any]] = []
     for r in sorted_gt:
+        if r.label_uncertain:
+            label_uncertain_points.append({
+                "snr_db": r.snr_db,
+                "best_mode": r.best_mode,
+                "best_mode_bps": r.best_mode_bps,
+                "selection_reason": r.selection_reason,
+            })
+    if label_uncertain_points:
+        review_reasons.append(
+            f"Label uncertainty (label_uncertain=True) detected at {len(label_uncertain_points)} points: "
+            f"{[p['snr_db'] for p in label_uncertain_points]}."
+        )
+
+    # 5. Target-Overlapping Confidence Intervals Classification (Material vs Non-Material)
+    material_overlap_points: List[Dict[str, Any]] = []
+    non_material_overlap_points: List[Dict[str, Any]] = []
+
+    for r in sorted_gt:
+        bm = r.best_mode
+        bm_bps = r.best_mode_bps
+
         for mod_name, ber, se, ci_l, ci_h in [
             ("BPSK", r.bpsk_ber, r.bpsk_se, r.bpsk_ci_low, r.bpsk_ci_high),
             ("QPSK", r.qpsk_ber, r.qpsk_se, r.qpsk_ci_low, r.qpsk_ci_high),
             ("16QAM", r.qam16_ber, r.qam16_se, r.qam16_ci_low, r.qam16_ci_high),
             ("64QAM", r.qam64_ber, r.qam64_se, r.qam64_ci_low, r.qam64_ci_high),
         ]:
-            if ci_l <= ber_target <= ci_h:
-                overlapping_ci_modes.append({
+            if ci_l <= ber_target <= ci_h and se > 1e-12:
+                mod_bps = MODULATION_BPS[mod_name]
+                # Materiality classification:
+                # An overlap is MATERIAL if resolving its uncertainty could change BestMode or a transition decision:
+                # 1. mod has higher spectral efficiency than BestMode (mod_bps > bm_bps): potential eligibility could upgrade BestMode.
+                # 2. mod is the selected BestMode: ineligibility risk could downgrade BestMode.
+                # Non-material:
+                # mod has strictly lower spectral efficiency than BestMode (mod_bps < bm_bps) and is not BestMode:
+                # the higher-rate BestMode is already eligible and dominates, so mod's uncertainty cannot affect the policy.
+                is_material = (mod_bps > bm_bps) or (mod_name == bm)
+
+                overlap_entry = {
                     "snr_db": r.snr_db,
                     "modulation": mod_name,
+                    "bits_per_symbol": mod_bps,
                     "ber": ber,
                     "se": se,
                     "ci_low": ci_l,
                     "ci_high": ci_h,
-                    "is_best_mode": (mod_name == r.best_mode),
-                })
+                    "best_mode_at_snr": bm,
+                    "best_mode_bps": bm_bps,
+                    "is_best_mode": (mod_name == bm),
+                    "material": is_material,
+                }
 
-    # Final Status: PASS only if no issues materially prevent a stable canonical baseline
-    overall_status = "PASS" if (grid_integrity_passed and monotonicity_passed and dt_fidelity_passed) else "REVIEW"
+                if is_material:
+                    material_overlap_points.append(overlap_entry)
+                else:
+                    non_material_overlap_points.append(overlap_entry)
+
+    material_overlap_count = len(material_overlap_points)
+    if material_overlap_count > 0:
+        pts_summary = [f"{p['modulation']}@{p['snr_db']}dB" for p in material_overlap_points]
+        review_reasons.append(
+            f"Material target-overlapping CI detected at {material_overlap_count} instances where uncertainty "
+            f"can affect BestMode / transition decision: {pts_summary}."
+        )
+
+    # Final Overall Decision:
+    # PASS only if:
+    # - grid integrity passes
+    # - monotonicity passes
+    # - DT fidelity = 100%
+    # - no label-uncertain points
+    # - no material target-overlap points
+    overall_status = "PASS" if (
+        grid_integrity_passed
+        and monotonicity_passed
+        and dt_fidelity_passed
+        and len(label_uncertain_points) == 0
+        and material_overlap_count == 0
+    ) else "REVIEW"
 
     return {
         "status": overall_status,
         "grid_integrity_passed": grid_integrity_passed,
         "monotonicity_passed": monotonicity_passed,
         "dt_fidelity_passed": dt_fidelity_passed,
+        "label_uncertain_passed": (len(label_uncertain_points) == 0),
+        "material_overlap_passed": (material_overlap_count == 0),
         "actual_snr_count": len(actual_snrs),
         "expected_snr_count": len(expected_snrs),
         "missing_modes": missing_modes,
         "non_monotonic_transitions": non_monotonic_transitions,
-        "target_overlapping_ci_modes": overlapping_ci_modes,
-        "target_overlapping_ci_count": len(overlapping_ci_modes),
+        "label_uncertain_points": label_uncertain_points,
+        "label_uncertain_count": len(label_uncertain_points),
+        "material_overlap_points": material_overlap_points,
+        "material_overlap_count": material_overlap_count,
+        "non_material_overlap_points": non_material_overlap_points,
+        "non_material_overlap_count": len(non_material_overlap_points),
         "review_reasons": review_reasons,
     }
 
@@ -451,6 +517,20 @@ def generate_freeze_markdown_report(
     sorted_gt = sorted(gt_rows, key=lambda r: r.snr_db)
     status = freeze_audit["status"]
     status_badge = "🟢 **PASS**" if status == "PASS" else "🟡 **REVIEW REQUIRED**"
+
+    lbl_unc_badge = (
+        "PASS (0 uncertain points)"
+        if freeze_audit["label_uncertain_passed"]
+        else f"REVIEW ({freeze_audit['label_uncertain_count']} uncertain points)"
+    )
+    mat_ov_badge = (
+        "PASS (0 material overlaps)"
+        if freeze_audit["material_overlap_passed"]
+        else f"REVIEW ({freeze_audit['material_overlap_count']} material overlaps)"
+    )
+    grid_badge = "PASS" if freeze_audit["grid_integrity_passed"] else "FAIL"
+    mono_badge = "PASS" if freeze_audit["monotonicity_passed"] else "FAIL"
+    dt_badge = "PASS" if freeze_audit["dt_fidelity_passed"] else "FAIL"
 
     lines = [
         "# PHY-ML R0 Canonical Baseline: Final Packaging & Freeze Report",
@@ -489,34 +569,62 @@ def generate_freeze_markdown_report(
         "## 2. R0 Freeze Gate Audit",
         "",
         f"- **Overall Freeze Decision:** {status_badge}",
-        f"- **Grid Integrity:** `{'PASS' if freeze_audit['grid_integrity_passed'] else 'FAIL'}` ({freeze_audit['actual_snr_count']} / {freeze_audit['expected_snr_count']} points present, zero duplicates).",
-        f"- **BestMode Monotonicity:** `{'PASS' if freeze_audit['monotonicity_passed'] else 'FAIL'}` ({len(freeze_audit['non_monotonic_transitions'])} regressions detected).",
-        f"- **CART Model Selection Fidelity:** `{'PASS' if freeze_audit['dt_fidelity_passed'] else 'FAIL'}` ({dt_metrics.accuracy * 100:.2f}% training accuracy).",
-        "- **Target-Overlapping Confidence Intervals:** `" + str(freeze_audit['target_overlapping_ci_count']) + r"` mode instances overlap $\text{BER}_{\text{target}} = 0.0100$.",
+        f"- **Grid Integrity:** `{grid_badge}` ({freeze_audit['actual_snr_count']} / {freeze_audit['expected_snr_count']} points present, zero duplicates).",
+        f"- **BestMode Monotonicity:** `{mono_badge}` ({len(freeze_audit['non_monotonic_transitions'])} regressions detected).",
+        f"- **CART Model Selection Fidelity:** `{dt_badge}` ({dt_metrics.accuracy * 100:.2f}% training accuracy).",
+        f"- **Ground Truth Label Uncertainty:** `{lbl_unc_badge}`.",
+        f"- **Material Target-Overlapping CIs:** `{mat_ov_badge}`.",
+        f"- **Non-Material Candidate Overlaps:** `{freeze_audit['non_material_overlap_count']}` instances recorded (dominated lower-rate modes; cannot affect selected policy).",
         "",
     ]
 
     if freeze_audit["review_reasons"]:
         lines.extend([
-            "### Specific Points Requiring Review:",
+            "### Specific Points Flagged for Review:",
             "",
         ])
         for r in freeze_audit["review_reasons"]:
             lines.append(f"- ⚠️ {r}")
         lines.append("")
 
-    if freeze_audit["target_overlapping_ci_modes"]:
+    if freeze_audit["label_uncertain_points"]:
         lines.extend([
-            "### Candidate Modes Overlapping Target Confidence Interval:",
+            "### Points Exhibiting Label Uncertainty (best_m_opt != best_m_pess):",
             "",
-            "| SNR (dB) | Candidate Mode | Empirical BER | Block SE | 95% CI Low | 95% CI High | Selected BestMode? |",
-            "|:--------:|:--------------:|:-------------:|:--------:|:----------:|:-----------:|:------------------:|",
+            "| SNR (dB) | Conservative BestMode | Spectral Efficiency | Selection Reason |",
+            "|:--------:|:---------------------:|:-------------------:|:-----------------|",
         ])
-        for item in freeze_audit["target_overlapping_ci_modes"]:
-            bm_str = "YES" if item["is_best_mode"] else "No"
+        for item in freeze_audit["label_uncertain_points"]:
+            lines.append(
+                f"| {item['snr_db']:8.2f} | {item['best_mode']:21s} | {item['best_mode_bps']:19d} | {item['selection_reason']} |"
+            )
+        lines.append("")
+
+    if freeze_audit["material_overlap_points"]:
+        lines.extend([
+            "### Material Target-Overlapping Candidate Modes (Can Affect BestMode Decision):",
+            "",
+            "| SNR (dB) | Candidate Mode | Empirical BER | Block SE | 95% CI Low | 95% CI High | BestMode at SNR | Impact on Policy |",
+            "|:--------:|:--------------:|:-------------:|:--------:|:----------:|:-----------:|:---------------:|:-----------------|",
+        ])
+        for item in freeze_audit["material_overlap_points"]:
             lines.append(
                 f"| {item['snr_db']:8.2f} | {item['modulation']:14s} | {item['ber']:13.4e} | {item['se']:8.4e} | "
-                f"{item['ci_low']:10.4e} | {item['ci_high']:11.4e} | {bm_str:18s} |"
+                f"{item['ci_low']:10.4e} | {item['ci_high']:11.4e} | {item['best_mode_at_snr']:15s} | Potential BestMode shift |"
+            )
+        lines.append("")
+
+    if freeze_audit["non_material_overlap_points"]:
+        lines.extend([
+            "### Non-Material Target-Overlapping Modes (Dominated by Higher-Rate Candidate):",
+            "",
+            "| SNR (dB) | Candidate Mode | Empirical BER | Block SE | 95% CI Low | 95% CI High | BestMode at SNR | Impact on Policy |",
+            "|:--------:|:--------------:|:-------------:|:--------:|:----------:|:-----------:|:---------------:|:-----------------|",
+        ])
+        for item in freeze_audit["non_material_overlap_points"]:
+            lines.append(
+                f"| {item['snr_db']:8.2f} | {item['modulation']:14s} | {item['ber']:13.4e} | {item['se']:8.4e} | "
+                f"{item['ci_low']:10.4e} | {item['ci_high']:11.4e} | {item['best_mode_at_snr']:15s} | None (dominated by higher-rate mode) |"
             )
         lines.append("")
 

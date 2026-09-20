@@ -12,6 +12,7 @@ Verifies:
 9. Full end-to-end packaging pipeline and artifact generation.
 """
 import csv
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
@@ -231,8 +232,8 @@ class TestPackageR0Freeze(unittest.TestCase):
             self.assertIsInstance(commit, str)
             self.assertGreater(len(commit), 0)
 
-    def test_07_freeze_gate_data_driven_pass_and_review(self):
-        """Verify freeze gate yields PASS for valid data and REVIEW when regressions are injected."""
+    def test_07a_freeze_gate_clean_fixture_passes(self):
+        """Verify freeze gate yields PASS for valid, monotonic data with zero material uncertainty."""
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_p = Path(tmp_dir)
             deep_csv = tmp_p / "deep" / "calibration_1d_cuda_pooled.csv"
@@ -248,7 +249,6 @@ class TestPackageR0Freeze(unittest.TestCase):
             labels = [r.best_mode for r in gt_rows]
             _, dt_metrics, _, _ = sweep_and_select_cart_depth(snrs, labels)
 
-            # Case A: Standard Monotonic Data -> PASS
             pass_audit = run_freeze_gate(
                 gt_rows=gt_rows,
                 dt_metrics=dt_metrics,
@@ -256,46 +256,192 @@ class TestPackageR0Freeze(unittest.TestCase):
                 expected_snrs=snrs,
             )
             self.assertEqual(pass_audit["status"], "PASS")
+            self.assertTrue(pass_audit["grid_integrity_passed"])
             self.assertTrue(pass_audit["monotonicity_passed"])
             self.assertTrue(pass_audit["dt_fidelity_passed"])
+            self.assertTrue(pass_audit["label_uncertain_passed"])
+            self.assertTrue(pass_audit["material_overlap_passed"])
+            self.assertEqual(pass_audit["material_overlap_count"], 0)
+            self.assertEqual(len(pass_audit["review_reasons"]), 0)
 
-            # Case B: Injected Non-Monotonic Regression -> REVIEW
+    def test_07b_freeze_gate_non_material_overlap_remains_pass(self):
+        """Verify non-material candidate overlap (dominated lower-rate mode) remains PASS."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            deep_csv = tmp_p / "deep" / "calibration_1d_cuda_pooled.csv"
+            refine_csv = tmp_p / "refine" / "calibration_1d_cuda_pooled.csv"
+
+            create_synthetic_calibration_csv(deep_csv, SYNTHETIC_DEEP_25_SNRS)
+            create_synthetic_calibration_csv(refine_csv, SYNTHETIC_REFINE_3_SNRS)
+
+            _, merged_cal, _ = load_and_merge_r0_calibration(deep_csv, refine_csv)
+            gt_cfg = GroundTruthConfig()
+            gt_rows = compute_ground_truth(merged_cal, gt_cfg)
+            snrs = [r.snr_db for r in gt_rows]
+            labels = [r.best_mode for r in gt_rows]
+            _, dt_metrics, _, _ = sweep_and_select_cart_depth(snrs, labels)
+
+            # Find a point where BestMode is higher rate than BPSK (e.g. 16QAM or 64QAM)
+            idx_high_mode = next(i for i, r in enumerate(gt_rows) if r.best_mode_bps > 1)
+            target_row = gt_rows[idx_high_mode]
+
+            # Inject a target overlap on BPSK: BPSK CI overlaps 0.01
+            # Since BPSK (1 bps) < best_mode_bps (>1) and BPSK != best_mode, it is NON-MATERIAL.
+            modified_row = replace(
+                target_row,
+                bpsk_ber=0.010,
+                bpsk_se=0.001,
+                bpsk_ci_low=0.008,
+                bpsk_ci_high=0.012,
+            )
+            test_gt = list(gt_rows)
+            test_gt[idx_high_mode] = modified_row
+
+            audit = run_freeze_gate(
+                gt_rows=test_gt,
+                dt_metrics=dt_metrics,
+                merged_cal=merged_cal,
+                expected_snrs=snrs,
+            )
+            self.assertEqual(audit["status"], "PASS")
+            self.assertTrue(audit["material_overlap_passed"])
+            self.assertEqual(audit["material_overlap_count"], 0)
+            self.assertGreaterEqual(audit["non_material_overlap_count"], 1)
+            self.assertEqual(len(audit["review_reasons"]), 0)
+
+    def test_07c_freeze_gate_material_overlap_triggers_review(self):
+        """Verify material candidate overlap (higher-rate mode or BestMode) triggers REVIEW."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            deep_csv = tmp_p / "deep" / "calibration_1d_cuda_pooled.csv"
+            refine_csv = tmp_p / "refine" / "calibration_1d_cuda_pooled.csv"
+
+            create_synthetic_calibration_csv(deep_csv, SYNTHETIC_DEEP_25_SNRS)
+            create_synthetic_calibration_csv(refine_csv, SYNTHETIC_REFINE_3_SNRS)
+
+            _, merged_cal, _ = load_and_merge_r0_calibration(deep_csv, refine_csv)
+            gt_cfg = GroundTruthConfig()
+            gt_rows = compute_ground_truth(merged_cal, gt_cfg)
+            snrs = [r.snr_db for r in gt_rows]
+            labels = [r.best_mode for r in gt_rows]
+            _, dt_metrics, _, _ = sweep_and_select_cart_depth(snrs, labels)
+
+            # Scenario 1: Overlap on a higher-rate candidate mode
+            idx_bpsk = next(i for i, r in enumerate(gt_rows) if r.best_mode == "BPSK")
+            target_row = gt_rows[idx_bpsk]
+
+            # Inject QPSK (2 bps > 1 bps) overlapping target 0.01
+            modified_row = replace(
+                target_row,
+                qpsk_ber=0.010,
+                qpsk_se=0.001,
+                qpsk_ci_low=0.008,
+                qpsk_ci_high=0.012,
+            )
+            test_gt_higher = list(gt_rows)
+            test_gt_higher[idx_bpsk] = modified_row
+
+            audit_higher = run_freeze_gate(
+                gt_rows=test_gt_higher,
+                dt_metrics=dt_metrics,
+                merged_cal=merged_cal,
+                expected_snrs=snrs,
+            )
+            self.assertEqual(audit_higher["status"], "REVIEW")
+            self.assertFalse(audit_higher["material_overlap_passed"])
+            self.assertGreater(audit_higher["material_overlap_count"], 0)
+            self.assertTrue(any("Material target-overlapping CI" in r for r in audit_higher["review_reasons"]))
+
+            # Scenario 2: Overlap on the BestMode itself
+            idx_bm = next(i for i, r in enumerate(gt_rows) if r.best_mode == "QPSK")
+            target_bm_row = gt_rows[idx_bm]
+            modified_bm_row = replace(
+                target_bm_row,
+                qpsk_ber=0.010,
+                qpsk_se=0.001,
+                qpsk_ci_low=0.008,
+                qpsk_ci_high=0.012,
+            )
+            test_gt_bm = list(gt_rows)
+            test_gt_bm[idx_bm] = modified_bm_row
+
+            audit_bm = run_freeze_gate(
+                gt_rows=test_gt_bm,
+                dt_metrics=dt_metrics,
+                merged_cal=merged_cal,
+                expected_snrs=snrs,
+            )
+            self.assertEqual(audit_bm["status"], "REVIEW")
+            self.assertFalse(audit_bm["material_overlap_passed"])
+            self.assertGreater(audit_bm["material_overlap_count"], 0)
+
+    def test_07d_freeze_gate_label_uncertain_triggers_review(self):
+        """Verify any label_uncertain=True flag unconditionally triggers REVIEW."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            deep_csv = tmp_p / "deep" / "calibration_1d_cuda_pooled.csv"
+            refine_csv = tmp_p / "refine" / "calibration_1d_cuda_pooled.csv"
+
+            create_synthetic_calibration_csv(deep_csv, SYNTHETIC_DEEP_25_SNRS)
+            create_synthetic_calibration_csv(refine_csv, SYNTHETIC_REFINE_3_SNRS)
+
+            _, merged_cal, _ = load_and_merge_r0_calibration(deep_csv, refine_csv)
+            gt_cfg = GroundTruthConfig()
+            gt_rows = compute_ground_truth(merged_cal, gt_cfg)
+            snrs = [r.snr_db for r in gt_rows]
+            labels = [r.best_mode for r in gt_rows]
+            _, dt_metrics, _, _ = sweep_and_select_cart_depth(snrs, labels)
+
+            test_gt = list(gt_rows)
+            test_gt[5] = replace(test_gt[5], label_uncertain=True)
+
+            audit = run_freeze_gate(
+                gt_rows=test_gt,
+                dt_metrics=dt_metrics,
+                merged_cal=merged_cal,
+                expected_snrs=snrs,
+            )
+            self.assertEqual(audit["status"], "REVIEW")
+            self.assertFalse(audit["label_uncertain_passed"])
+            self.assertEqual(audit["label_uncertain_count"], 1)
+            self.assertTrue(any("Label uncertainty" in r for r in audit["review_reasons"]))
+
+    def test_07e_freeze_gate_non_monotonic_triggers_review(self):
+        """Verify non-monotonic BestMode transitions trigger REVIEW."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_p = Path(tmp_dir)
+            deep_csv = tmp_p / "deep" / "calibration_1d_cuda_pooled.csv"
+            refine_csv = tmp_p / "refine" / "calibration_1d_cuda_pooled.csv"
+
+            create_synthetic_calibration_csv(deep_csv, SYNTHETIC_DEEP_25_SNRS)
+            create_synthetic_calibration_csv(refine_csv, SYNTHETIC_REFINE_3_SNRS)
+
+            _, merged_cal, _ = load_and_merge_r0_calibration(deep_csv, refine_csv)
+            gt_cfg = GroundTruthConfig()
+            gt_rows = compute_ground_truth(merged_cal, gt_cfg)
+            snrs = [r.snr_db for r in gt_rows]
+            labels = [r.best_mode for r in gt_rows]
+            _, dt_metrics, _, _ = sweep_and_select_cart_depth(snrs, labels)
+
             corrupted_gt = list(gt_rows)
-            # Invert highest SNR label to BPSK (bps=1) after a higher mode
             last_r = corrupted_gt[-1]
-            corrupted_last = last_r.__class__(
-                snr_db=last_r.snr_db,
-                bpsk_ber=last_r.bpsk_ber,
-                qpsk_ber=last_r.qpsk_ber,
-                qam16_ber=last_r.qam16_ber,
-                qam64_ber=last_r.qam64_ber,
-                bpsk_se=last_r.bpsk_se,
-                qpsk_se=last_r.qpsk_se,
-                qam16_se=last_r.qam16_se,
-                qam64_se=last_r.qam64_se,
-                bpsk_eligible=True,
-                qpsk_eligible=False,
-                qam16_eligible=False,
-                qam64_eligible=False,
+            corrupted_gt[-1] = replace(
+                last_r,
                 best_mode="BPSK",
                 best_mode_bps=1,
-                fallback_used=False,
-                selection_reason="injected_regression",
-                reliability_uncertain=False,
-                label_uncertain=False,
-                boundary_uncertain=False,
+                selection_reason="injected_non_monotonic",
             )
-            corrupted_gt[-1] = corrupted_last
 
-            review_audit = run_freeze_gate(
+            audit = run_freeze_gate(
                 gt_rows=corrupted_gt,
                 dt_metrics=dt_metrics,
                 merged_cal=merged_cal,
                 expected_snrs=snrs,
             )
-            self.assertEqual(review_audit["status"], "REVIEW")
-            self.assertFalse(review_audit["monotonicity_passed"])
-            self.assertGreater(len(review_audit["review_reasons"]), 0)
+            self.assertEqual(audit["status"], "REVIEW")
+            self.assertFalse(audit["monotonicity_passed"])
+            self.assertGreater(len(audit["non_monotonic_transitions"]), 0)
+            self.assertTrue(any("Non-monotonic" in r for r in audit["review_reasons"]))
 
     def test_08_post_processing_isolation_no_phy_imports(self):
         """Verify package_r0_freeze does not import Sionna, BatchPHYEngine, or cuda_engine."""

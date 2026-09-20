@@ -2,7 +2,13 @@
 
 Investigates switching boundary threshold convergence as local SNR resolution
 is systematically refined:
-    1.0 dB (integer-spaced grid) -> 0.5 dB (Deep 70k grid) -> 0.25 dB (transition-centered refinement)
+    1.0-dB local transition view (integer-spaced grid) ->
+    0.5-dB local transition view (Deep 70k grid) ->
+    0.25-dB local transition refinement view (transition-centered refinement)
+
+Note on Grid Terminology:
+    These resolution views are NOT uniform global grids across the entire SNR span;
+    they describe the local resolution of SNR points available around mode switching boundaries.
 
 Consumes:
     - Deep reference calibration table: results/r0_mc_deep_70k/calibration_1d_cuda_pooled.csv
@@ -10,8 +16,8 @@ Consumes:
 
 Produces in results/r0_snr_grid_convergence/:
     1. snr_grid_convergence.csv (per-transition bracket endpoints, widths, midpoints, shifts, and DT metrics)
-    2. snr_grid_views_labels.csv (per-SNR classification labels and eligibility across the 3 views)
-    3. snr_grid_convergence.md (thesis-quality human-readable publication report)
+    2. snr_grid_views_labels.csv (per-SNR classification labels and eligibility across the views)
+    3. snr_grid_convergence.md (data-driven publication report)
 
 Strict Constraint:
     This script performs post-processing analysis only and MUST NOT invoke PHY simulation.
@@ -81,11 +87,12 @@ def construct_resolution_views(
     deep_cal: Dict[float, Dict[str, Dict[str, float]]],
     merged_cal: Dict[float, Dict[str, Dict[str, float]]],
 ) -> Tuple[Dict[float, Dict[str, Dict[str, float]]], Dict[float, Dict[str, Dict[str, float]]], Dict[float, Dict[str, Dict[str, float]]]]:
-    """Construct the three resolution calibration views: 1.0 dB, 0.5 dB, and 0.25 dB.
+    """Construct the three local resolution calibration views: 1.0 dB, 0.5 dB, and 0.25 dB.
 
-    1.0-dB view: integer-spaced SNR points from Deep 70k.
-    0.5-dB view: canonical Deep 70k grid points.
-    0.25-dB view: merged Deep 70k plus 16.75, 22.75, 28.25 dB refinement points.
+    These describe local transition bracket resolution, NOT uniform global grids:
+    - 1.0-dB local transition view: integer-spaced SNR points from Deep 70k.
+    - 0.5-dB local transition view: canonical Deep 70k grid points.
+    - 0.25-dB local transition refinement view: merged Deep 70k plus 16.75, 22.75, 28.25 dB refinement points.
     """
     view_1_0_snrs = [s for s in sorted(deep_cal.keys()) if abs(s - round(s)) < 1e-4]
     view_1_0_cal = {s: deep_cal[s] for s in view_1_0_snrs}
@@ -328,7 +335,11 @@ def run_snr_grid_convergence_study(
     print(f"[Convergence Study] Saved Convergence CSV:   {csv_conv_path}")
     print(f"[Convergence Study] Saved View Labels CSV:   {csv_labels_path}")
     print(f"[Convergence Study] Saved Markdown Report:   {report_path}")
-    for v_key, v_name in [("view_1_0", "1.0-dB View"), ("view_0_5", "0.5-dB View"), ("view_0_25", "0.25-dB View")]:
+    for v_key, v_name in [
+        ("view_1_0", "1.0-dB Local Transition View"),
+        ("view_0_5", "0.5-dB Local Transition View"),
+        ("view_0_25", "0.25-dB Local Transition Refinement View"),
+    ]:
         dm = dt_metrics[v_key]
         print(f"[Convergence Study] {v_name} DT Selection: Depth={dm['selected_depth']}, Actual={dm['actual_depth']}, Fidelity={dm['fidelity'] * 100:.1f}%, Thresholds={dm['thresholds']}")
 
@@ -340,6 +351,135 @@ def run_snr_grid_convergence_study(
     }
 
 
+def compute_data_driven_findings(
+    convergence_rows: List[Dict[str, Any]],
+    dt_metrics: Dict[str, Any],
+) -> List[str]:
+    """Compute empirical findings conditionally from actual results without pre-ordained conclusions."""
+    findings = []
+
+    # 1. Bracket Width Behavior
+    bracket_summaries = []
+    all_narrowed = True
+    all_halved = True
+    for r in convergence_rows:
+        tr = r["transition"]
+        w_10 = r["view_1_0_bracket_width_db"]
+        w_05 = r["view_0_5_bracket_width_db"]
+        w_025 = r["view_0_25_bracket_width_db"]
+
+        if w_10 is not None and w_05 is not None and w_025 is not None:
+            bracket_summaries.append(f"{tr}: {w_10:.2f} dB -> {w_05:.2f} dB -> {w_025:.2f} dB")
+            if not (w_05 < w_10 and w_025 < w_05):
+                all_narrowed = False
+            # Check within 0.05 dB tolerance of exact geometric halving
+            if not (abs(w_05 - 0.5 * w_10) <= 0.05 and abs(w_025 - 0.5 * w_05) <= 0.05):
+                all_halved = False
+        else:
+            all_narrowed = False
+            all_halved = False
+            bracket_summaries.append(f"{tr}: incomplete bracket data")
+
+    if all_halved and bracket_summaries:
+        findings.append(
+            f"- **Switching Bracket Halving:** Uncertainty brackets halved systematically across all transitions "
+            f"as local resolution was refined: {'; '.join(bracket_summaries)}."
+        )
+    elif all_narrowed and bracket_summaries:
+        findings.append(
+            f"- **Switching Bracket Narrowing:** Uncertainty brackets narrowed monotonically across all transitions: "
+            f"{'; '.join(bracket_summaries)}."
+        )
+    elif bracket_summaries:
+        findings.append(
+            f"- **Switching Bracket Resolution:** Empirical bracket widths observed across views: "
+            f"{'; '.join(bracket_summaries)}."
+        )
+    else:
+        findings.append("- **Switching Bracket Resolution:** No transition brackets detected.")
+
+    # 2. Threshold Shift Dynamics
+    shift_summaries = []
+    diminishing_count = 0
+    bounded_count = 0
+    total_shifts = 0
+
+    for r in convergence_rows:
+        tr = r["transition"]
+        s1 = r["lut_shift_10_to_05_db"]
+        s2 = r["lut_shift_05_to_025_db"]
+        if s1 is not None and s2 is not None:
+            total_shifts += 1
+            is_dim = abs(s2) <= abs(s1)
+            is_bnd = (abs(s1) <= 0.25 + 1e-4) and (abs(s2) <= 0.125 + 1e-4)
+            if is_dim:
+                diminishing_count += 1
+            if is_bnd:
+                bounded_count += 1
+            shift_summaries.append(f"{tr}: Δθ(1.0→0.5) = {s1:+.3f} dB, Δθ(0.5→0.25) = {s2:+.3f} dB")
+        elif s1 is not None:
+            shift_summaries.append(f"{tr}: Δθ(1.0→0.5) = {s1:+.3f} dB, Δθ(0.5→0.25) = N/A")
+        elif s2 is not None:
+            shift_summaries.append(f"{tr}: Δθ(1.0→0.5) = N/A, Δθ(0.5→0.25) = {s2:+.3f} dB")
+
+    if total_shifts > 0 and diminishing_count == total_shifts:
+        findings.append(
+            f"- **Threshold Shift Diminution:** Empirical threshold shifts diminished in magnitude with finer local resolution "
+            f"across all {total_shifts} transitions ({'; '.join(shift_summaries)})."
+        )
+    elif total_shifts > 0:
+        findings.append(
+            f"- **Empirical Threshold Shifts:** Shifts observed across local resolution transitions: "
+            f"{'; '.join(shift_summaries)} ({diminishing_count}/{total_shifts} transitions showed diminishing magnitude)."
+        )
+    else:
+        findings.append("- **Empirical Threshold Shifts:** Insufficient adjacent transition points to compute shift progression.")
+
+    if total_shifts > 0 and bounded_count == total_shifts:
+        findings.append(
+            "- **Theoretical Bound Adherence:** All observed midpoint shifts satisfied the theoretical symmetric bisection bounds "
+            "($|\\Delta \\theta_{1.0 \\to 0.5}| \\le 0.25\\text{ dB}$, $|\\Delta \\theta_{0.5 \\to 0.25}| \\le 0.125\\text{ dB}$)."
+        )
+    elif total_shifts > 0:
+        findings.append(
+            f"- **Theoretical Bound Evaluation:** {bounded_count}/{total_shifts} transitions satisfied theoretical bisection bounds "
+            "($|\\Delta \\theta_{1.0 \\to 0.5}| \\le 0.25\\text{ dB}$, $|\\Delta \\theta_{0.5 \\to 0.25}| \\le 0.125\\text{ dB}$); "
+            "see Section 2 for individual bracket endpoints."
+        )
+
+    # 3. Decision Tree Model Selection & Fidelity
+    d_10 = dt_metrics["view_1_0"]["selected_depth"]
+    d_05 = dt_metrics["view_0_5"]["selected_depth"]
+    d_025 = dt_metrics["view_0_25"]["selected_depth"]
+
+    f_10 = dt_metrics["view_1_0"]["fidelity"]
+    f_05 = dt_metrics["view_0_5"]["fidelity"]
+    f_025 = dt_metrics["view_0_25"]["fidelity"]
+
+    all_same_depth = (d_10 == d_05 == d_025)
+    all_100_fidelity = (abs(f_10 - 1.0) < 1e-4 and abs(f_05 - 1.0) < 1e-4 and abs(f_025 - 1.0) < 1e-4)
+
+    if all_same_depth and all_100_fidelity:
+        findings.append(
+            f"- **Decision Tree Policy Stability:** The optimal CART depth selected via model selection remained constant at "
+            f"$d={d_10}$ across all three local transition views, each achieving 100.0% fidelity to ground-truth labels."
+        )
+    elif all_100_fidelity:
+        findings.append(
+            f"- **Decision Tree Model Selection:** 100.0% training fidelity was achieved across all views, with selected depths "
+            f"varying with local resolution: $d={d_10}$ (1.0-dB local view), $d={d_05}$ (0.5-dB local view), $d={d_025}$ (0.25-dB local refinement view)."
+        )
+    else:
+        findings.append(
+            f"- **Decision Tree Model Selection:** Selected depths and fidelities observed across views: "
+            f"1.0-dB local view ($d={d_10}$, fidelity={f_10 * 100:.1f}%), "
+            f"0.5-dB local view ($d={d_05}$, fidelity={f_05 * 100:.1f}%), "
+            f"0.25-dB local refinement view ($d={d_025}$, fidelity={f_025 * 100:.1f}%)."
+        )
+
+    return findings
+
+
 def generate_convergence_markdown_report(
     output_path: Path,
     convergence_rows: List[Dict[str, Any]],
@@ -349,64 +489,70 @@ def generate_convergence_markdown_report(
     confidence_k: float,
 ) -> None:
     """Format publication-quality Markdown report for the SNR-grid convergence study."""
+    data_findings = compute_data_driven_findings(convergence_rows, dt_metrics)
+
     lines = [
         "# PHY-ML R0 SNR-Grid Convergence & Resolution Sensitivity Study",
         "",
-        "**Topic:** Empirical Switching-Boundary Convergence and Decision Tree Policy Stability under Grid Refinement  ",
-        "**Resolution Progression:** `1.0 dB` (integer-spaced grid) $\\to$ `0.5 dB` (Deep reference grid) $\\to$ `0.25 dB` (transition-centered refinement)  ",
+        "**Topic:** Empirical Switching-Boundary Convergence and Decision Tree Policy Stability under Local Grid Refinement  ",
+        "**Resolution Progression:** `1.0-dB local transition view` (integer-spaced grid) $\\to$ `0.5-dB local transition view` (Deep reference grid) $\\to$ `0.25-dB local transition refinement view` (transition-centered refinement)  ",
         "**Methodology:** Conservative 95% Confidence Interval Upper Bound ($\\text{BER} + 1.96 \\cdot \\text{SE} \\le 0.0100$)  ",
         "**Monte Carlo Budget:** Deep 70,000 blocks/seed (140,000 pooled blocks/point) | FP64 CUDA  ",
         "**Study Characterization:** Formal Grid Convergence / Resolution Sensitivity (NOT an ablation)  ",
+        "**Output Directory:** `results/r0_snr_grid_convergence/`  ",
         "**Date:** 2026-09-20  ",
         "",
         "---",
         "",
+        "> [!NOTE]",
+        "> **Local Transition Views vs Global Grids:** The \"1.0-dB local transition view\", \"0.5-dB local transition view\", and \"0.25-dB local transition refinement view\" are **NOT uniform global grids** across the full SNR span. They describe the local resolution of SNR evaluation points available around mode switching boundaries. This targeted refinement evaluates switching sensitivity without redundant dense simulation across stable single-mode regions.",
+        "",
         "## 1. Executive Summary",
         "",
         "This study measures the sensitivity and convergence behavior of AMC switching boundaries as local SNR resolution is refined around mode transitions.",
-        "By probing the exact midpoints of the 0.5-dB transition intervals (**16.75 dB**, **22.75 dB**, and **28.25 dB**), the switching brackets are halved from $0.50\\text{ dB}$ down to $0.25\\text{ dB}$ without re-running any existing calibration points.",
+        "By probing candidate midpoints of the 0.5-dB transition intervals (**16.75 dB**, **22.75 dB**, and **28.25 dB**), the local switching brackets can be resolved down to $0.25\\text{ dB}$ without re-running any existing calibration points.",
         "",
-        "### Key Convergence Findings:",
-        "- **Bracket Halving:** Uncertainty brackets across all three transitions halve systematically: $1.00\\text{ dB} \\to 0.50\\text{ dB} \\to 0.25\\text{ dB}$.",
-        "- **Bounded Threshold Shifts:** Empirical threshold shifts diminish in magnitude with finer resolution, adhering to the theoretical bound $|\\Delta \\theta| \\le \\frac{\\Delta \\text{SNR}}{4}$.",
-        "- **Decision Tree Model Invariance:** The optimal CART Decision Tree depth remains parsimonious ($d=3$), retaining 100% fidelity to the ground-truth labels across all three resolution views.",
+        "### Empirical Convergence Findings (Computed from Data):",
+    ]
+    lines.extend(data_findings)
+    lines.extend([
         "",
         "---",
         "",
         "## 2. Transition Switching-Boundary Convergence",
         "",
-        "| Transition | View | Lower Bracket (dB) | Upper Bracket (dB) | Bracket Width (dB) | Midpoint Threshold (dB) | Midpoint Shift (dB) | CART Threshold (dB) | CART Shift (dB) |",
-        "|:----------:|:----:|:------------------:|:------------------:|:------------------:|:-----------------------:|:-------------------:|:-------------------:|:---------------:|",
-    ]
+        "| Transition | Resolution View | Lower Bracket (dB) | Upper Bracket (dB) | Bracket Width (dB) | Midpoint Threshold (dB) | Midpoint Shift (dB) | CART Threshold (dB) | CART Shift (dB) |",
+        "|:----------:|:---------------:|:------------------:|:------------------:|:------------------:|:-----------------------:|:-------------------:|:-------------------:|:---------------:|",
+    ])
 
     for r in convergence_rows:
         tr = r["transition"]
-        # 1.0 dB row
+        # 1.0-dB local transition view row
         w_10 = f"{r['view_1_0_bracket_width_db']:.2f}" if r["view_1_0_bracket_width_db"] is not None else "N/A"
         th_10 = f"{r['view_1_0_midpoint_db']:.3f}" if r["view_1_0_midpoint_db"] is not None else "N/A"
         c_10 = f"{r['view_1_0_cart_threshold_db']:.3f}" if r["view_1_0_cart_threshold_db"] is not None else "N/A"
         lines.append(
-            f"| {tr:12s} | 1.0 dB  | {r['view_1_0_lower_db']:18.2f} | {r['view_1_0_upper_db']:18.2f} | {w_10:18s} | {th_10:23s} | {'---':19s} | {c_10:19s} | {'---':15s} |"
+            f"| {tr:12s} | 1.0-dB local transition view | {r['view_1_0_lower_db']:18.2f} | {r['view_1_0_upper_db']:18.2f} | {w_10:18s} | {th_10:23s} | {'---':19s} | {c_10:19s} | {'---':15s} |"
         )
 
-        # 0.5 dB row
+        # 0.5-dB local transition view row
         w_05 = f"{r['view_0_5_bracket_width_db']:.2f}" if r["view_0_5_bracket_width_db"] is not None else "N/A"
         th_05 = f"{r['view_0_5_midpoint_db']:.3f}" if r["view_0_5_midpoint_db"] is not None else "N/A"
         sh_lut_10_05 = f"{r['lut_shift_10_to_05_db']:+.3f}" if r["lut_shift_10_to_05_db"] is not None else "N/A"
         c_05 = f"{r['view_0_5_cart_threshold_db']:.3f}" if r["view_0_5_cart_threshold_db"] is not None else "N/A"
         sh_c_10_05 = f"{r['cart_shift_10_to_05_db']:+.3f}" if r["cart_shift_10_to_05_db"] is not None else "N/A"
         lines.append(
-            f"| {tr:12s} | 0.5 dB  | {r['view_0_5_lower_db']:18.2f} | {r['view_0_5_upper_db']:18.2f} | {w_05:18s} | {th_05:23s} | {sh_lut_10_05:19s} | {c_05:19s} | {sh_c_10_05:15s} |"
+            f"| {tr:12s} | 0.5-dB local transition view | {r['view_0_5_lower_db']:18.2f} | {r['view_0_5_upper_db']:18.2f} | {w_05:18s} | {th_05:23s} | {sh_lut_10_05:19s} | {c_05:19s} | {sh_c_10_05:15s} |"
         )
 
-        # 0.25 dB row
+        # 0.25-dB local transition view row
         w_025 = f"{r['view_0_25_bracket_width_db']:.2f}" if r["view_0_25_bracket_width_db"] is not None else "N/A"
         th_025 = f"{r['view_0_25_midpoint_db']:.3f}" if r["view_0_25_midpoint_db"] is not None else "N/A"
         sh_lut_05_025 = f"{r['lut_shift_05_to_025_db']:+.3f}" if r["lut_shift_05_to_025_db"] is not None else "N/A"
         c_025 = f"{r['view_0_25_cart_threshold_db']:.3f}" if r["view_0_25_cart_threshold_db"] is not None else "N/A"
         sh_c_05_025 = f"{r['cart_shift_05_to_025_db']:+.3f}" if r["cart_shift_05_to_025_db"] is not None else "N/A"
         lines.append(
-            f"| {tr:12s} | 0.25 dB | {r['view_0_25_lower_db']:18.2f} | {r['view_0_25_upper_db']:18.2f} | {w_025:18s} | {th_025:23s} | {sh_lut_05_025:19s} | {c_025:19s} | {sh_c_05_025:15s} |"
+            f"| {tr:12s} | 0.25-dB local transition view | {r['view_0_25_lower_db']:18.2f} | {r['view_0_25_upper_db']:18.2f} | {w_025:18s} | {th_025:23s} | {sh_lut_05_025:19s} | {c_025:19s} | {sh_c_05_025:15s} |"
         )
 
     lines.extend([
@@ -420,9 +566,9 @@ def generate_convergence_markdown_report(
     ])
 
     for v_key, v_title in [
-        ("view_1_0", "1.0-dB Resolution View (Integer Points)"),
-        ("view_0_5", "0.5-dB Resolution View (Canonical Deep Grid)"),
-        ("view_0_25", "0.25-dB Resolution View (Refined Midpoints Grid)"),
+        ("view_1_0", "1.0-dB Local Transition View (Integer Points)"),
+        ("view_0_5", "0.5-dB Local Transition View (Canonical Deep Grid)"),
+        ("view_0_25", "0.25-dB Local Transition Refinement View (Refined Midpoints Grid)"),
     ]:
         dm = dt_metrics[v_key]
         lines.extend([
@@ -440,8 +586,8 @@ def generate_convergence_markdown_report(
         "",
         "## 4. Detailed Operating Point Classifications across Views",
         "",
-        "| SNR (dB) | In 1.0-dB View? | In 0.5-dB View? | In 0.25-dB View? | 1.0-dB BestMode | 0.5-dB BestMode | 0.25-dB BestMode | Eligible Modes (0.25-dB View) |",
-        "|:--------:|:---------------:|:---------------:|:----------------:|:---------------:|:---------------:|:----------------:|:-----------------------------:|",
+        "| SNR (dB) | In 1.0-dB Local View? | In 0.5-dB Local View? | In 0.25-dB Local View? | 1.0-dB Local BestMode | 0.5-dB Local BestMode | 0.25-dB Local BestMode | Eligible Modes (0.25-dB Local View) |",
+        "|:--------:|:---------------------:|:---------------------:|:----------------------:|:---------------------:|:---------------------:|:----------------------:|:-----------------------------------:|",
     ])
 
     for row in view_label_rows:
@@ -449,7 +595,7 @@ def generate_convergence_markdown_report(
         in_05 = "YES" if row["in_view_0_5"] else "No"
         in_025 = "YES" if row["in_view_0_25"] else "No"
         lines.append(
-            f"| {row['snr_db']:8.2f} | {in_10:15s} | {in_05:15s} | {in_025:16s} | {row['view_1_0_label']:15s} | {row['view_0_5_label']:15s} | {row['view_0_25_label']:16s} | {row['view_0_25_eligible_modes']:29s} |"
+            f"| {row['snr_db']:8.2f} | {in_10:21s} | {in_05:21s} | {in_025:22s} | {row['view_1_0_label']:21s} | {row['view_0_5_label']:21s} | {row['view_0_25_label']:22s} | {row['view_0_25_eligible_modes']:35s} |"
         )
 
     lines.extend([
@@ -459,16 +605,16 @@ def generate_convergence_markdown_report(
         "## 5. Scientific Methodological Stance",
         "",
         "1. **Formal Convergence Analysis:**",
-        "   - The step from 1.0 dB to 0.5 dB to 0.25 dB represents continuous spatial resolution sensitivity testing.",
-        "   - It verifies that the discrete 1D look-up table and CART boundaries are physically grounded approximations converging toward the true underlying continuous Rayleigh switching manifold.",
+        "   - The progression from 1.0-dB to 0.5-dB to 0.25-dB local transition views provides an empirical framework to test spatial resolution sensitivity around switching boundaries.",
+        "   - It assesses whether the discrete 1D look-up table and CART boundaries converge toward stable operating thresholds as spatial sampling is refined around switching boundaries.",
         "",
         "2. **Compute Efficiency via Targeted Refinement:**",
         "   - Evaluating only 3 targeted refinement points (16.75, 22.75, 28.25 dB) instead of a dense 0.25-dB global grid (which would require 120 SNR points) achieves 97.5% compute savings while providing identical switching-boundary resolution.",
         "",
         "3. **Artifact Manifest:**",
-        f"   - `snr_grid_convergence.csv`: Quantitative bracket endpoints, widths, midpoints, and shifts across transitions.",
-        f"   - `snr_grid_views_labels.csv`: SNR point membership, classifications, and candidate mode error metrics.",
-        f"   - `snr_grid_convergence.md`: This comprehensive publication-grade report.",
+        f"   - `results/r0_snr_grid_convergence/snr_grid_convergence.csv`: Quantitative bracket endpoints, widths, midpoints, and shifts across transitions.",
+        f"   - `results/r0_snr_grid_convergence/snr_grid_views_labels.csv`: SNR point membership, classifications, and candidate mode error metrics.",
+        f"   - `results/r0_snr_grid_convergence/snr_grid_convergence.md`: This comprehensive publication-grade report.",
     ])
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

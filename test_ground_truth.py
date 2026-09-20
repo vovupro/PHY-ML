@@ -41,7 +41,7 @@ class TestGroundTruth(unittest.TestCase):
             22.0: {
                 "BPSK": {"ber": 0.0001, "se": 0.00005, "bit_errors": 10, "total_bits": 7680000},
                 "QPSK": {"ber": 0.0008, "se": 0.0002, "bit_errors": 80, "total_bits": 7680000},
-                "16QAM": {"ber": 0.008, "se": 0.0012, "bit_errors": 800, "total_bits": 7680000},
+                "16QAM": {"ber": 0.008, "se": 0.0008, "bit_errors": 800, "total_bits": 7680000},
                 "64QAM": {"ber": 0.030, "se": 0.0025, "bit_errors": 3000, "total_bits": 7680000},
             },
             30.0: {
@@ -121,12 +121,22 @@ class TestGroundTruth(unittest.TestCase):
 
     def test_boundary_uncertainty_flag(self):
         """Verify boundary_uncertain flag triggers when BER is within k*SE of target."""
-        # Near 22 dB: 16QAM BER = 0.008, SE = 0.0012. Target = 0.01.
-        # Difference = |0.008 - 0.01| = 0.002.
-        # 1.96 * SE = 1.96 * 0.0012 = 0.002352.
-        # Since 0.002 <= 0.002352, boundary_uncertain should be True!
+        test_data = {
+            22.0: {
+                "BPSK": {"ber": 0.0001, "se": 0.00005},
+                "QPSK": {"ber": 0.0008, "se": 0.0002},
+                "16QAM": {"ber": 0.008, "se": 0.0012},  # 0.008 + 1.96*0.0012 = 0.01035 > 0.01, 0.008 - 1.96*0.0012 = 0.00565 < 0.01
+                "64QAM": {"ber": 0.030, "se": 0.0025},
+            },
+            0.0: {
+                "BPSK": {"ber": 0.15, "se": 0.005},
+                "QPSK": {"ber": 0.22, "se": 0.006},
+                "16QAM": {"ber": 0.32, "se": 0.007},
+                "64QAM": {"ber": 0.38, "se": 0.008},
+            },
+        }
         cfg = GroundTruthConfig(ber_target=0.01, confidence_k=1.96)
-        rows = compute_ground_truth(self.cal_data, cfg)
+        rows = compute_ground_truth(test_data, cfg)
         row_map = {r.snr_db: r for r in rows}
 
         self.assertTrue(row_map[22.0].boundary_uncertain)
@@ -200,13 +210,17 @@ class TestGroundTruth(unittest.TestCase):
         self.assertEqual(lut.predict(28.24), "16QAM")
         self.assertEqual(lut.predict(28.25), "64QAM")
 
-    def test_point_estimate_eligibility(self):
-        """Verify candidate mode is eligible iff BER_point_estimate <= 0.0100."""
+    def test_ci_upper_bound_eligibility(self):
+        """Verify candidate mode is eligible iff upper 95% CI (BER + 1.96*SE) <= 0.0100."""
         test_data = {
             20.0: {
+                # BPSK: upper CI = 0.005 + 1.96 * 0.0005 = 0.00598 <= 0.01 -> eligible
                 "BPSK": {"ber": 0.005, "se": 0.0005},
-                "QPSK": {"ber": 0.010000, "se": 0.0005},   # Exactly at target: eligible
-                "16QAM": {"ber": 0.010001, "se": 0.0005},  # Strictly above target: ineligible
+                # QPSK: nominal BER = 0.008 <= 0.01, upper CI = 0.008 + 1.96 * 0.001 = 0.00996 <= 0.01 -> eligible
+                "QPSK": {"ber": 0.008, "se": 0.0010},
+                # 16QAM: nominal BER = 0.009 <= 0.01 passes, but upper CI = 0.009 + 1.96 * 0.001 = 0.01096 > 0.01 -> REJECTED
+                "16QAM": {"ber": 0.009, "se": 0.0010},
+                # 64QAM: nominal BER = 0.050 > 0.01 -> REJECTED
                 "64QAM": {"ber": 0.050, "se": 0.0010},
             }
         }
@@ -215,10 +229,10 @@ class TestGroundTruth(unittest.TestCase):
         r = rows[0]
 
         self.assertTrue(r.bpsk_eligible)
-        self.assertTrue(r.qpsk_eligible, "BER == 0.010000 must be eligible")
-        self.assertFalse(r.qam16_eligible, "BER == 0.010001 must NOT be eligible")
+        self.assertTrue(r.qpsk_eligible, "Upper CI <= 0.0100 must be eligible")
+        self.assertFalse(r.qam16_eligible, "Nominal passes but upper CI > 0.0100 must be REJECTED")
         self.assertFalse(r.qam64_eligible)
-        self.assertEqual(r.best_mode, "QPSK", "Highest rate eligible mode is QPSK (2 bpcu)")
+        self.assertEqual(r.best_mode, "QPSK", "Highest rate eligible mode under CI rule is QPSK (2 bpcu)")
 
     def test_fallback_behavior(self):
         """Verify fallback selects BPSK with fallback_used=True when no mode qualifies."""
@@ -293,18 +307,19 @@ class TestGroundTruth(unittest.TestCase):
         rows = compute_ground_truth(cal_data, cfg)
         self.assertEqual(len(rows), 25)
 
-        # 2. Mode counts
+        # 2. Mode counts under canonical conservative CI rule:
+        # At 23.0 dB, 16QAM has upper CI = 0.0100011 > 0.0100 -> QPSK selected
         mode_counts = {}
         for r in rows:
             mode_counts[r.best_mode] = mode_counts.get(r.best_mode, 0) + 1
         self.assertEqual(mode_counts.get("BPSK"), 10)
-        self.assertEqual(mode_counts.get("QPSK"), 6)
-        self.assertEqual(mode_counts.get("16QAM"), 5)
+        self.assertEqual(mode_counts.get("QPSK"), 7)
+        self.assertEqual(mode_counts.get("16QAM"), 4)
         self.assertEqual(mode_counts.get("64QAM"), 4)
 
-        # 3. Fallback points (0.0 to 12.0 dB)
+        # 3. Fallback points (0.0 to 14.0 dB: at 14 dB BPSK upper CI marginally exceeds 0.01)
         fallback_snrs = [r.snr_db for r in rows if r.fallback_used]
-        self.assertEqual(fallback_snrs, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0])
+        self.assertEqual(fallback_snrs, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0])
 
         # 4. Uncertainty points
         rel_unc_snrs = [r.snr_db for r in rows if r.reliability_uncertain]
@@ -313,11 +328,12 @@ class TestGroundTruth(unittest.TestCase):
         self.assertEqual(lbl_unc_snrs, [23.0, 28.0])
 
         # 5. LUT thresholds & monotonicity
+        # QPSK -> 16QAM boundary shifts from 22.75 to 23.25 dB due to conservative CI rule at 23.0 dB
         lut = LookupTable1D.from_ground_truth(rows)
         self.assertEqual(len(lut.non_monotonic_transitions), 0, "Monotonicity must PASS")
         self.assertEqual(
             lut.thresholds,
-            [(16.75, "BPSK", "QPSK"), (22.75, "QPSK", "16QAM"), (28.25, "16QAM", "64QAM")]
+            [(16.75, "BPSK", "QPSK"), (23.25, "QPSK", "16QAM"), (28.25, "16QAM", "64QAM")]
         )
 
 

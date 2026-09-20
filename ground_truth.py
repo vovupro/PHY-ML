@@ -68,6 +68,15 @@ class GroundTruthRow:
     label_uncertain: bool
     boundary_uncertain: bool
     num_blocks: int = 0
+    # Conservative 95% Confidence Interval bounds (audit / reporting)
+    bpsk_ci_low: float = 0.0
+    bpsk_ci_high: float = 0.0
+    qpsk_ci_low: float = 0.0
+    qpsk_ci_high: float = 0.0
+    qam16_ci_low: float = 0.0
+    qam16_ci_high: float = 0.0
+    qam64_ci_low: float = 0.0
+    qam64_ci_high: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +89,14 @@ class GroundTruthRow:
             "QPSK_SE": self.qpsk_se,
             "16QAM_SE": self.qam16_se,
             "64QAM_SE": self.qam64_se,
+            "BPSK_CI_low": self.bpsk_ci_low,
+            "BPSK_CI_high": self.bpsk_ci_high,
+            "QPSK_CI_low": self.qpsk_ci_low,
+            "QPSK_CI_high": self.qpsk_ci_high,
+            "16QAM_CI_low": self.qam16_ci_low,
+            "16QAM_CI_high": self.qam16_ci_high,
+            "64QAM_CI_low": self.qam64_ci_low,
+            "64QAM_CI_high": self.qam64_ci_high,
             "BPSK_eligible": self.bpsk_eligible,
             "QPSK_eligible": self.qpsk_eligible,
             "16QAM_eligible": self.qam16_eligible,
@@ -126,8 +143,10 @@ def compute_ground_truth(
 ) -> List[GroundTruthRow]:
     """Compute ground truth BestMode for each SNR point based on raw calibration metrics.
 
-    Decision Rule:
-        1. Find candidate modes satisfying BER <= ber_target.
+    Canonical Decision Rule (Conservative 95% Confidence Interval):
+        1. Find candidate modes satisfying conservative upper 95% CI bound:
+           BER_hat + k * SE <= ber_target  (where k = 1.96 by default).
+           Therefore a mode is eligible only when its full upper 95% CI is below target.
         2. Among eligible modes, select the mode with highest bits_per_symbol.
         3. If no mode passes, invoke fallback_policy (robustest_mode -> BPSK).
         4. Detect formal uncertainty:
@@ -141,6 +160,7 @@ def compute_ground_truth(
     snrs = sorted(list(calibration_data.keys()))
     modes_in_order = ["BPSK", "QPSK", "16QAM", "64QAM"]
     rows: List[GroundTruthRow] = []
+    k = config.confidence_k
 
     for snr in snrs:
         snr_dict = calibration_data[snr]
@@ -149,8 +169,12 @@ def compute_ground_truth(
         se_dict = {m: snr_dict.get(m, {}).get("se", 0.0) for m in modes_in_order}
         snr_blocks = max((int(snr_dict.get(m, {}).get("num_blocks", 0)) for m in modes_in_order), default=0)
 
-        # Step 1: Check eligibility against reliability constraint at point estimate
-        eligible = {m: ber_dict[m] <= config.ber_target for m in modes_in_order}
+        # 95% Confidence Interval bounds per mode
+        ci_low_dict = {m: max(0.0, float(ber_dict[m] - k * se_dict[m])) for m in modes_in_order}
+        ci_high_dict = {m: float(ber_dict[m] + k * se_dict[m]) for m in modes_in_order}
+
+        # Step 1: Check conservative CI-based eligibility: Upper 95% CI <= ber_target
+        eligible = {m: ci_high_dict[m] <= config.ber_target for m in modes_in_order}
 
         # Step 2: Select eligible mode with highest spectral rate
         passed_modes = [m for m in modes_in_order if eligible[m]]
@@ -158,20 +182,18 @@ def compute_ground_truth(
         if passed_modes:
             best_m = max(passed_modes, key=lambda m: MODULATION_BPS[m])
             fallback = False
-            reason = f"Max rate mode satisfying BER <= {config.ber_target:.4f}"
+            reason = f"Max rate mode satisfying upper 95% CI (BER + {k:.2f}*SE) <= {config.ber_target:.4f}"
         else:
             # Step 3: Handle no-mode-passes fallback
             fallback = True
             if config.fallback_policy == "robustest_mode":
                 best_m = "BPSK"
-                reason = f"Fallback ({config.fallback_policy}): no mode satisfied BER <= {config.ber_target:.4f}"
+                reason = f"Fallback ({config.fallback_policy}): no mode satisfied upper 95% CI <= {config.ber_target:.4f}"
             else:
-                best_m = min(modes_in_order, key=lambda m: ber_dict[m])
-                reason = f"Fallback ({config.fallback_policy}): minimum BER mode selected"
+                best_m = min(modes_in_order, key=lambda m: ci_high_dict[m])
+                reason = f"Fallback ({config.fallback_policy}): minimum upper CI mode selected"
 
         # Step 4: Formal Uncertainty Semantics
-        k = config.confidence_k
-
         # 4a. Reliability uncertainty: Does ANY candidate mode's 95% confidence interval overlap ber_target?
         reliability_uncertain = any(
             is_reliability_uncertain(ber_dict[m], se_dict[m], target=config.ber_target, k=k)
@@ -183,22 +205,16 @@ def compute_ground_truth(
         # Optimistic scenario: Each mode receives its lower CI bound max(0.0, BER - k*SE)
         optimistic_passed = [
             m for m in modes_in_order
-            if max(0.0, ber_dict[m] - k * se_dict[m]) <= config.ber_target
+            if ci_low_dict[m] <= config.ber_target
         ]
         if optimistic_passed:
             best_m_opt = max(optimistic_passed, key=lambda m: MODULATION_BPS[m])
         else:
-            best_m_opt = "BPSK" if config.fallback_policy == "robustest_mode" else min(modes_in_order, key=lambda m: max(0.0, ber_dict[m] - k * se_dict[m]))
+            best_m_opt = "BPSK" if config.fallback_policy == "robustest_mode" else min(modes_in_order, key=lambda m: ci_low_dict[m])
 
         # Pessimistic scenario: Each mode receives its upper CI bound (BER + k*SE)
-        pessimistic_passed = [
-            m for m in modes_in_order
-            if (ber_dict[m] + k * se_dict[m]) <= config.ber_target
-        ]
-        if pessimistic_passed:
-            best_m_pess = max(pessimistic_passed, key=lambda m: MODULATION_BPS[m])
-        else:
-            best_m_pess = "BPSK" if config.fallback_policy == "robustest_mode" else min(modes_in_order, key=lambda m: ber_dict[m] + k * se_dict[m])
+        # Note: best_m_pess matches best_m by definition under the conservative CI rule
+        best_m_pess = best_m
 
         label_uncertain = (best_m_opt != best_m_pess)
         boundary_uncertain = label_uncertain
@@ -226,6 +242,14 @@ def compute_ground_truth(
                 label_uncertain=label_uncertain,
                 boundary_uncertain=boundary_uncertain,
                 num_blocks=snr_blocks,
+                bpsk_ci_low=ci_low_dict["BPSK"],
+                bpsk_ci_high=ci_high_dict["BPSK"],
+                qpsk_ci_low=ci_low_dict["QPSK"],
+                qpsk_ci_high=ci_high_dict["QPSK"],
+                qam16_ci_low=ci_low_dict["16QAM"],
+                qam16_ci_high=ci_high_dict["16QAM"],
+                qam64_ci_low=ci_low_dict["64QAM"],
+                qam64_ci_high=ci_high_dict["64QAM"],
             )
         )
 
@@ -241,6 +265,10 @@ def save_ground_truth_csv(rows: List[GroundTruthRow], output_path: Union[str, Pa
         "snr_db",
         "BPSK_BER", "QPSK_BER", "16QAM_BER", "64QAM_BER",
         "BPSK_SE", "QPSK_SE", "16QAM_SE", "64QAM_SE",
+        "BPSK_CI_low", "BPSK_CI_high",
+        "QPSK_CI_low", "QPSK_CI_high",
+        "16QAM_CI_low", "16QAM_CI_high",
+        "64QAM_CI_low", "64QAM_CI_high",
         "BPSK_eligible", "QPSK_eligible", "16QAM_eligible", "64QAM_eligible",
         "best_mode", "best_mode_bps", "fallback_used", "selection_reason",
         "reliability_uncertain", "label_uncertain", "boundary_uncertain",

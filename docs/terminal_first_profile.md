@@ -18,7 +18,25 @@ The development and execution lifecycle is split across two dedicated nodes with
    - **Execution Policy**: Heavy Monte Carlo loops, CUDA calibration, GPU benchmarks, and full PHY acceptance test suites are **not** executed locally.
 
 2. **Remote Compute Node (CKEY - Linux with NVIDIA RTX 3060)**:
-   - **Environment**: Canonical scientific runtime with project `.venv`, PyTorch with CUDA (`sm_86`), and Sionna 2.0 primitives.
+   - **Qualified Runtime**:
+     - Python: `3.13.5` (State: Python 3.13.5 is part of the qualified runtime, even though `requirements-ckey.txt` cannot enforce the interpreter version)
+     - PyTorch: `2.9.1+cu126`
+     - CUDA Runtime: `12.6`
+     - Sionna: `2.0.0`
+     - Hardware: NVIDIA RTX 3060 (`sm_86`)
+   - **Environment Setup**:
+     ```bash
+     python3 -m venv .venv
+     source .venv/bin/activate
+     python -m pip install --upgrade pip
+     pip install -r requirements-ckey.txt
+     ```
+   - **Runtime Verification Commands**:
+     ```bash
+     python --version
+     python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+     pip check
+     ```
    - **Role & Constraints**: CKEY is an **execution and verification node only, NOT a development/editing node**. Scientific source code must **not** be edited directly on CKEY. If remote verification fails, report the failure and perform the fix on the Local Control Node, then commit/push and rerun remotely.
    - **Responsibilities**: Full PHY acceptance test suites, Monte Carlo calibration runs, GPU benchmarks, and heavy numerical/ML workloads.
    - **Synchronization**: Pulls changes from GitHub (`git pull`).

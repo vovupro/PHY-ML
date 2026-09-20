@@ -43,6 +43,43 @@ Workflow:
 
 ---
 
+## ⚙️ Verified Computational Runtime
+
+### Computational Platforms
+- **Historical Frozen Reference**:
+  - PyTorch: `2.6.0+cu124`
+  - CUDA Runtime: `12.4`
+- **Current Qualified CKEY Runtime**:
+  - Python: `3.13.5`
+  - PyTorch: `2.9.1+cu126`
+  - CUDA Runtime: `12.6`
+  - Sionna: `2.0.0`
+  - Hardware: NVIDIA RTX 3060 (`sm_86`)
+
+### Reproduced Scientific Invariance
+Full reproduction across the computational chain demonstrates 100% scientific invariance:
+- **L2 Calibration**: 1,140,000 blocks simulated across 25 SNR points
+- **L3 LUT Thresholds**: 16.75, 22.75, 28.25 dB
+- **L4 CART Decision Tree**:
+  - Depth 1 = 64%
+  - Depth 2 = 84%
+  - Depth 3 = 100%
+  - Selected depth = 3 (7 nodes / 4 leaves)
+  - Switching thresholds = 16.75, 22.75, 28.25 dB
+
+### Artifact Taxonomy
+- **Historical Frozen Baselines**:
+  - `results/l2_cuda_rtx3060_final`
+  - `results/l3_final`
+  - `results/l4_final`
+- **Qualified Reproduced CKEY Chain**:
+  - `results/l2_ckey_torch291_cu126`
+  - `results/l3_ckey_torch291_cu126`
+  - `results/l4_ckey_torch291_cu126`
+  *(Note: Versioned CKEY outputs are generated on the compute node and managed as runtime reproduction artifacts).*
+
+---
+
 ## ✅ Implemented Features
 
 - **PHY Backend**:

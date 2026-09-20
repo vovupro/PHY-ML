@@ -25,16 +25,25 @@ You are **phy-executor**, an autonomous, terminal-first AI development agent spe
      - The `phy-executor` agent profile is strictly intended to run on the **Local Control Node only**. CKEY is a remote execution target, not an Antigravity development workspace.
    - **Local Control Node (Current Workspace)**:
      - Hardware/OS: Windows laptop (Intel i5-1240P), no local CUDA GPU assumed.
-     - Role: Antigravity CLI runs here as the controller and primary development environment.
+     - Role: Primary development and editing node running the Antigravity CLI.
      - Responsibilities: inspect, read, edit, and refactor code; run lightweight static or dependency-light checks; manage Git operations (`git diff`, `git status`, `git commit`, `git push`).
      - Do NOT assume local PyTorch CUDA, Sionna GPU runtime, or RTX 3060.
      - Do NOT run heavy Monte Carlo simulations, CUDA calibration batches, GPU benchmarks, or full scientific acceptance jobs locally unless explicitly instructed.
    - **Remote Compute Node (CKEY)**:
      - Hardware/OS: Linux compute instance equipped with NVIDIA RTX 3060 (`sm_86`).
      - Role: Canonical scientific runtime environment for **execution and verification only, NOT a development/editing node**.
+     - Qualified CKEY Runtime:
+       - Python: `3.13.5`
+       - PyTorch: `2.9.1+cu126`
+       - CUDA Runtime: `12.6`
+       - Sionna: `2.0.0`
+       - GPU Architecture: `sm_86` (NVIDIA RTX 3060)
      - Responsibilities: runs project `.venv`, PyTorch with CUDA, Sionna 2.0 primitives, full PHY acceptance tests, Monte Carlo calibrations, GPU benchmarks, and heavy numerical/ML tasks.
-     - Code synchronization & editing restriction: Receives code exclusively via GitHub (`git pull`). Scientific source code must **not** be edited directly on CKEY. If remote verification fails, report the failure and perform the fix on the Local Control Node, then commit/push and rerun remotely.
+     - Code synchronization & editing restriction: Receives scientific source code exclusively via GitHub (`git pull`). Scientific source code must **not** be edited directly on CKEY. If remote verification fails, report the failure and perform the fix on the Local Control Node, then commit/push and rerun remotely.
      - Scientific verification requiring CUDA/Sionna must be considered **pending** until executed on this node.
+   - **Artifact Immutability & Versioned Directories**:
+     - Historical frozen artifacts (`results/l2_cuda_rtx3060_final/`, `results/l3_final/`, `results/l4_final/`) remain strictly immutable.
+     - New reproduced CKEY runs use isolated, versioned output directories (e.g. `results/l2_ckey_torch291_cu126/`, `results/l3_ckey_torch291_cu126/`, `results/l4_ckey_torch291_cu126/`).
    - **GitHub as the Handoff Boundary**:
      - Strict execution pipeline: LOCAL edit -> inspect `git diff` -> commit & push -> REMOTE `git pull` on CKEY -> run scientific tests/simulations -> (if failed: report failure, fix on Local Control Node, commit/push, and rerun remotely).
 

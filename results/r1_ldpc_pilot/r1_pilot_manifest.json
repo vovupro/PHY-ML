@@ -1,8 +1,8 @@
 {
   "title": "PHY-ML R1 LDPC Coded PHY Pilot Verification Manifest",
-  "generated_at_utc": "2026-09-20T16:14:19.032218+00:00",
-  "source_git_commit": "193d864f5570664a6bfc8714ca3c8766bd1aef8c",
-  "runtime_seconds": 10.636079400006565,
+  "generated_at_utc": "2026-09-20T16:31:19.016738+00:00",
+  "source_git_commit": "939cd89e017a537f2e9fbd0316ab258103a384b9",
+  "runtime_seconds": 9.807023000001209,
   "scientific_specification": {
     "channel_model": "Slow Rayleigh Flat Block Fading (E[|h|^2] = 1.0)",
     "csi_knowledge": "Perfect Coherent CSI (h known at receiver)",
@@ -20,66 +20,106 @@
       {
         "name": "BPSK-1/2",
         "modulation": "BPSK",
-        "code_rate": 0.5,
-        "code_rate_str": "1/2",
+        "constellation_size": 2,
         "bits_per_symbol": 1,
-        "spectral_efficiency": 0.5
+        "requested_code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "actual_k": 768,
+        "actual_n": 1536,
+        "effective_code_rate": 0.5,
+        "effective_spectral_efficiency": 0.5,
+        "symbols_per_block": 1536
       },
       {
         "name": "QPSK-1/2",
         "modulation": "QPSK",
-        "code_rate": 0.5,
-        "code_rate_str": "1/2",
+        "constellation_size": 4,
         "bits_per_symbol": 2,
-        "spectral_efficiency": 1.0
+        "requested_code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "actual_k": 1536,
+        "actual_n": 3072,
+        "effective_code_rate": 0.5,
+        "effective_spectral_efficiency": 1.0,
+        "symbols_per_block": 1536
       },
       {
         "name": "QPSK-2/3",
         "modulation": "QPSK",
-        "code_rate": 0.6666666666666666,
-        "code_rate_str": "2/3",
+        "constellation_size": 4,
         "bits_per_symbol": 2,
-        "spectral_efficiency": 1.3333333333333333
+        "requested_code_rate": 0.6666666666666666,
+        "code_rate_str": "2/3",
+        "actual_k": 2048,
+        "actual_n": 3072,
+        "effective_code_rate": 0.6666666666666666,
+        "effective_spectral_efficiency": 1.3333333333333333,
+        "symbols_per_block": 1536
       },
       {
         "name": "16QAM-1/2",
         "modulation": "16QAM",
-        "code_rate": 0.5,
-        "code_rate_str": "1/2",
+        "constellation_size": 16,
         "bits_per_symbol": 4,
-        "spectral_efficiency": 2.0
+        "requested_code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "actual_k": 3072,
+        "actual_n": 6144,
+        "effective_code_rate": 0.5,
+        "effective_spectral_efficiency": 2.0,
+        "symbols_per_block": 1536
       },
       {
         "name": "16QAM-3/4",
         "modulation": "16QAM",
-        "code_rate": 0.75,
-        "code_rate_str": "3/4",
+        "constellation_size": 16,
         "bits_per_symbol": 4,
-        "spectral_efficiency": 3.0
+        "requested_code_rate": 0.75,
+        "code_rate_str": "3/4",
+        "actual_k": 4608,
+        "actual_n": 6144,
+        "effective_code_rate": 0.75,
+        "effective_spectral_efficiency": 3.0,
+        "symbols_per_block": 1536
       },
       {
         "name": "64QAM-1/2",
         "modulation": "64QAM",
-        "code_rate": 0.5,
-        "code_rate_str": "1/2",
+        "constellation_size": 64,
         "bits_per_symbol": 6,
-        "spectral_efficiency": 3.0
+        "requested_code_rate": 0.5,
+        "code_rate_str": "1/2",
+        "actual_k": 4608,
+        "actual_n": 9216,
+        "effective_code_rate": 0.5,
+        "effective_spectral_efficiency": 3.0,
+        "symbols_per_block": 1536
       },
       {
         "name": "64QAM-2/3",
         "modulation": "64QAM",
-        "code_rate": 0.6666666666666666,
-        "code_rate_str": "2/3",
+        "constellation_size": 64,
         "bits_per_symbol": 6,
-        "spectral_efficiency": 4.0
+        "requested_code_rate": 0.6666666666666666,
+        "code_rate_str": "2/3",
+        "actual_k": 6144,
+        "actual_n": 9216,
+        "effective_code_rate": 0.6666666666666666,
+        "effective_spectral_efficiency": 4.0,
+        "symbols_per_block": 1536
       },
       {
         "name": "64QAM-3/4",
         "modulation": "64QAM",
-        "code_rate": 0.75,
-        "code_rate_str": "3/4",
+        "constellation_size": 64,
         "bits_per_symbol": 6,
-        "spectral_efficiency": 4.5
+        "requested_code_rate": 0.75,
+        "code_rate_str": "3/4",
+        "actual_k": 6912,
+        "actual_n": 9216,
+        "effective_code_rate": 0.75,
+        "effective_spectral_efficiency": 4.5,
+        "symbols_per_block": 1536
       }
     ],
     "snrs_db": [

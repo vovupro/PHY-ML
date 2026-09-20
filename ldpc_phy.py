@@ -20,7 +20,7 @@ Coded Physical Transmission Chain:
             ↓
     transmitted symbols x  [N_symbols = n // bits_per_symbol]
             ↓
-    Rayleigh block channel: y = h * x + n_w
+    Rayleigh block channel: y = h * x + sqrt(N0) * z  where z ~ CN(0, 1), E[|z|^2] = 1
             ↓
     Coherent perfect-CSI equalization: y_eq = y / h, N0_eff = N0 / |h|^2
             ↓
@@ -32,26 +32,45 @@ Coded Physical Transmission Chain:
             ↓
     Bit Error & Codeword Block Error Counters (BER_info, BLER)
 
-Independent Statistical Unit:
+Terminology & Scope Note:
+    In current R1 AMC link adaptation, the transmission unit is termed:
+        "LDPC information block / codeword"
+    It is NOT termed a 3GPP Transport Block because current R1 intentionally DOES NOT include:
+        - CRC attachment or parity checks
+        - Transport block segmentation / code block concatenation
+        - Hybrid ARQ (HARQ) or soft bit combining
+        - Automatic Repeat reQuest (ACK/NACK)
+        - Temporal feedback or retransmissions
+
+Independent Monte Carlo Statistical Unit:
     Under slow Rayleigh flat block fading, each transmission block of N_symbols (default 1536)
     experiences an independent complex channel fading draw h ~ CN(0, 1) held strictly constant
     across all symbols of that block.
     In the canonical 1-codeword-per-block mapping (n = N_symbols * bits_per_symbol), each
     codeword experiences exactly one fading realization.
-    Therefore, the CODEWORD / TRANSPORT-BLOCK is the independent statistical unit for reliability.
-    Codeword block error (BLER) constitutes an independent Bernoulli trial per block.
-    Standard error for BLER is SE(BLER) = sqrt(BLER * (1 - BLER) / N_blocks).
+    Therefore, the CODEWORD is the independent statistical unit for reliability:
+        Codeword error: decoded information block contains >= 1 erroneous information bit.
+        Codeword BLER = N_error_codewords / N_total_codewords.
+    Codeword BLER constitutes an independent Bernoulli trial per block.
     Information-bit BER standard error is calculated from the empirical sample standard deviation
-    of per-block BERs divided by sqrt(N_blocks).
+    of per-block BERs divided by sqrt(N_blocks), accounting for intra-codeword bit error correlation.
+
+Complex Noise Scaling Convention (Parent-Compatible with R0):
+    z ~ CN(0, 1) with E[|z|^2] = 1 (generated via Sionna complex_normal).
+    With symbol energy Es = 1, nominal noise variance is N0 = 1 / 10^(snr_db / 10).
+    Physical channel noise is:
+        n_w = sqrt(N0) * z
+    giving E[|n_w|^2] = N0 * E[|z|^2] = N0.
+    The factor sqrt(N0/2) must NOT be applied to complex_normal(), as complex_normal()
+    already distributes variance 0.5 to real and 0.5 to imaginary components.
 
 Fairness and SNR Axis Convention:
     The simulation axis remains strictly nominal Es/N0 in dB, preserving complete continuity
     with the frozen R0 baseline.
-    With symbol energy Es = 1, channel noise variance is N0 = 1 / 10^(snr_db / 10).
     The derived relationship to information-bit Eb/N0 is:
         Eb/N0 = (Es/N0) / eta
         (Eb/N0)_dB = (Es/N0)_dB - 10 * log10(eta)
-    where eta = Rc * log2(M) is the effective spectral efficiency in information bits per symbol.
+    where eta = (k/n) * log2(M) is the effective spectral efficiency in information bits per symbol.
 """
 from dataclasses import dataclass
 from functools import lru_cache
@@ -59,13 +78,12 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import scipy.stats
 import torch
 from sionna.phy.channel import GenerateFlatFadingChannel
 from sionna.phy.fec.ldpc import LDPC5GDecoder, LDPC5GEncoder
 from sionna.phy.mapping import Constellation, Demapper, Mapper, SymbolInds2Bits
 from sionna.phy.utils import complex_normal, db_to_lin
-
-from channel import BlockRNG, make_block_rng
 
 
 CONFIDENCE_K: float = 1.96
@@ -83,7 +101,7 @@ MODULATION_BPS: Dict[str, int] = {
 class CodedAction:
     """Representation of an LDPC-coded modulation action (modulation, code_rate)."""
     modulation: str          # "BPSK", "QPSK", "16QAM", "64QAM"
-    code_rate: float         # e.g. 0.5, 0.6666666666666666, 0.75
+    code_rate: float         # Requested code rate, e.g. 0.5, 0.6666666666666666, 0.75
     code_rate_str: str       # "1/2", "2/3", "3/4"
     name: str                # e.g. "BPSK-1/2", "QPSK-2/3"
 
@@ -95,25 +113,62 @@ class CodedAction:
         return MODULATION_BPS[mod_upper]
 
     @property
-    def spectral_efficiency(self) -> float:
-        """Effective spectral efficiency eta = Rc * log2(M) [info bits / complex symbol]."""
+    def nominal_spectral_efficiency(self) -> float:
+        """Nominal spectral efficiency Rc_requested * log2(M)."""
         return float(self.code_rate * self.bits_per_symbol)
 
-    def compute_eb_n0_db(self, es_n0_db: float) -> float:
-        """Derived relationship to information-bit Eb/N0: (Eb/N0)_dB = (Es/N0)_dB - 10*log10(eta)."""
-        eta = self.spectral_efficiency
-        if eta <= 0:
-            raise ValueError(f"Spectral efficiency must be positive, got {eta}")
-        return float(es_n0_db - 10.0 * math.log10(eta))
+    @property
+    def spectral_efficiency(self) -> float:
+        """Alias to nominal_spectral_efficiency."""
+        return self.nominal_spectral_efficiency
 
-    def to_dict(self) -> Dict[str, Any]:
+    def get_code_params(self, block_symbols: int = BLOCK_SYMBOLS_DEFAULT) -> Tuple[int, int, float, float]:
+        """Compute exact (k, n, effective_code_rate, effective_spectral_efficiency).
+
+        Parameters
+        ----------
+        block_symbols : int, default 1536
+            Number of complex symbols in one transmission block.
+
+        Returns
+        -------
+        k : int
+            Number of information bits per codeword.
+        n : int
+            Number of coded bits per codeword (n = block_symbols * bits_per_symbol).
+        eff_rc : float
+            Effective code rate k / n.
+        eff_eta : float
+            Effective spectral efficiency eff_rc * bits_per_symbol.
+        """
+        m = self.bits_per_symbol
+        n = block_symbols * m
+        k = int(round(n * self.code_rate))
+        eff_rc = float(k) / float(n)
+        eff_eta = float(eff_rc * m)
+        return k, n, eff_rc, eff_eta
+
+    def compute_eb_n0_db(self, es_n0_db: float, block_symbols: int = BLOCK_SYMBOLS_DEFAULT) -> float:
+        """Derived relationship to information-bit Eb/N0: (Eb/N0)_dB = (Es/N0)_dB - 10*log10(eta_eff)."""
+        _, _, _, eff_eta = self.get_code_params(block_symbols)
+        if eff_eta <= 0:
+            raise ValueError(f"Effective spectral efficiency must be positive, got {eff_eta}")
+        return float(es_n0_db - 10.0 * math.log10(eff_eta))
+
+    def to_dict(self, block_symbols: int = BLOCK_SYMBOLS_DEFAULT) -> Dict[str, Any]:
+        k, n, eff_rc, eff_eta = self.get_code_params(block_symbols)
         return {
             "name": self.name,
             "modulation": self.modulation,
-            "code_rate": self.code_rate,
-            "code_rate_str": self.code_rate_str,
+            "constellation_size": 2 ** self.bits_per_symbol,
             "bits_per_symbol": self.bits_per_symbol,
-            "spectral_efficiency": self.spectral_efficiency,
+            "requested_code_rate": self.code_rate,
+            "code_rate_str": self.code_rate_str,
+            "actual_k": k,
+            "actual_n": n,
+            "effective_code_rate": eff_rc,
+            "effective_spectral_efficiency": eff_eta,
+            "symbols_per_block": block_symbols,
         }
 
 
@@ -136,26 +191,136 @@ def get_ldpc_code_params(
     action: CodedAction,
     block_symbols: int = BLOCK_SYMBOLS_DEFAULT,
 ) -> Tuple[int, int]:
-    """Compute (k, n) code parameters for a transmission block.
+    """Compute (k, n) code parameters for a transmission block."""
+    k, n, _, _ = action.get_code_params(block_symbols)
+    return k, n
+
+
+def analyze_action_space(
+    actions: Sequence[CodedAction] = R1_INITIAL_ACTIONS,
+    block_symbols: int = BLOCK_SYMBOLS_DEFAULT,
+) -> Dict[str, Any]:
+    """Analyze R1 candidate action space for spectral efficiencies, equal-eta conflicts, and dominance."""
+    action_records = [a.to_dict(block_symbols) for a in actions]
+    unique_etas = sorted(list(set(r["effective_spectral_efficiency"] for r in action_records)))
+
+    # Identify equal-eta conflicts
+    equal_eta_groups: Dict[float, List[str]] = {}
+    for r in action_records:
+        eta = r["effective_spectral_efficiency"]
+        if eta not in equal_eta_groups:
+            equal_eta_groups[eta] = []
+        equal_eta_groups[eta].append(r["name"])
+
+    # Filter to groups with > 1 action
+    equal_eta_conflicts = {eta: names for eta, names in equal_eta_groups.items() if len(names) > 1}
+
+    dominance_analysis = [
+        {
+            "spectral_efficiency": 3.0,
+            "actions": ["16QAM-3/4", "64QAM-1/2"],
+            "comparison": (
+                "16QAM-3/4 (m=4, Rc=3/4) uses smaller constellation but weaker code; "
+                "64QAM-1/2 (m=6, Rc=1/2) uses denser constellation but stronger rate-1/2 LDPC code. "
+                "Relative BLER depends on SNR operating point and channel fading realization."
+            ),
+        }
+    ]
+
+    return {
+        "action_records": action_records,
+        "unique_spectral_efficiencies": unique_etas,
+        "equal_eta_conflicts": equal_eta_conflicts,
+        "dominance_analysis": dominance_analysis,
+    }
+
+
+@dataclass(frozen=True)
+class PairedChannelRealization:
+    """Shared physical channel realization (h, z) paired across candidate actions for a block batch.
+
+    Attributes
+    ----------
+    h : torch.Tensor
+        Complex channel coefficients [num_blocks, 1] with E[|h|^2] = 1.
+    z : torch.Tensor
+        Normalized complex noise vector [num_blocks, block_symbols] with E[|z|^2] = 1.
+    num_blocks : int
+        Number of transmission blocks in this batch.
+    block_symbols : int
+        Number of complex symbols per transmission block (default 1536).
+    """
+    h: torch.Tensor
+    z: torch.Tensor
+    num_blocks: int
+    block_symbols: int = BLOCK_SYMBOLS_DEFAULT
+
+
+def generate_paired_channel_realization(
+    num_blocks: int,
+    block_symbols: int = BLOCK_SYMBOLS_DEFAULT,
+    master_seed: Optional[int] = None,
+    channel_type: str = "rayleigh",
+    precision: str = "double",
+    device: Union[torch.device, str] = "cpu",
+) -> PairedChannelRealization:
+    """Deterministically generate shared physical channel realization (h, z) paired across actions.
+
+    The RNG streams for fading and noise are derived independently from the master seed,
+    ensuring that information payload bit drawing CANNOT perturb the channel or noise realizations.
 
     Parameters
     ----------
-    action : CodedAction
-        Modulation and code rate specification.
+    num_blocks : int
+        Number of transmission blocks.
     block_symbols : int, default 1536
-        Number of complex symbols in one transmission block.
+        Complex symbols per block.
+    master_seed : int, optional
+        Seed for deterministic generation.
+    channel_type : str, default 'rayleigh'
+        'rayleigh' or 'awgn'.
+    precision : str, default 'double'
+        'double' (complex128) or 'single' (complex64).
+    device : torch.device or str, default 'cpu'
+        Target PyTorch device.
 
     Returns
     -------
-    k : int
-        Number of information bits per codeword.
-    n : int
-        Number of coded bits per codeword (n = block_symbols * bits_per_symbol).
+    PairedChannelRealization
+        Shared physical realization (h, z) to be reused across all candidate actions.
     """
-    m = action.bits_per_symbol
-    n = block_symbols * m
-    k = int(round(n * action.code_rate))
-    return k, n
+    c_dtype = torch.complex128 if precision == "double" else torch.complex64
+    dev_str = str(device)
+
+    g_fading: Optional[torch.Generator] = None
+    g_noise: Optional[torch.Generator] = None
+
+    if master_seed is not None:
+        base = (master_seed * 1_000_003) & 0x7FFFFFFF
+        g_fading = torch.Generator(device="cpu").manual_seed((base + 202) & 0x7FFFFFFF)
+        g_noise = torch.Generator(device="cpu").manual_seed((base + 303) & 0x7FFFFFFF)
+
+    # 1. Fading coefficient h [num_blocks, 1]
+    if channel_type.lower() == "awgn":
+        h = torch.ones((num_blocks, 1), dtype=c_dtype, device=device)
+    else:
+        # Rayleigh flat fading: h ~ CN(0, 1), E[|h|^2] = 1.0
+        h = complex_normal([num_blocks, 1], precision=precision, device=dev_str, generator=g_fading)
+        if not isinstance(h, torch.Tensor):
+            h = torch.as_tensor(h, dtype=c_dtype, device=device)
+
+    # 2. Normalized complex noise z [num_blocks, block_symbols]
+    # z ~ CN(0, 1) with E[|z|^2] = 1.0
+    z = complex_normal([num_blocks, block_symbols], precision=precision, device=dev_str, generator=g_noise)
+    if not isinstance(z, torch.Tensor):
+        z = torch.as_tensor(z, dtype=c_dtype, device=device)
+
+    return PairedChannelRealization(
+        h=h,
+        z=z,
+        num_blocks=num_blocks,
+        block_symbols=block_symbols,
+    )
 
 
 class CodedModem:
@@ -181,10 +346,8 @@ class CodedModem:
         self.device_str = str(device)
 
         # Code dimension bookkeeping
-        self.k, self.n = get_ldpc_code_params(action, block_symbols)
-        self.effective_code_rate = float(self.k) / float(self.n)
+        self.k, self.n, self.effective_code_rate, self.effective_spectral_efficiency = action.get_code_params(block_symbols)
         self.bits_per_symbol = action.bits_per_symbol
-        self.spectral_efficiency = self.effective_code_rate * self.bits_per_symbol
 
         # Constellation type: PAM for BPSK (1 bit), QAM for QPSK/16QAM/64QAM
         const_type = "pam" if self.bits_per_symbol == 1 else "qam"
@@ -249,7 +412,7 @@ class CodedModem:
         """Coherent perfect-CSI equalization and soft demapping to LLRs.
 
         Mathematical Model:
-            y = h * x + n_w
+            y = h * x + sqrt(N0) * z
             y_eq = y / h
             N0_eff = N0 / |h|^2
             llr = Demapper(y_eq, N0_eff)
@@ -327,14 +490,19 @@ def simulate_coded_transmission(
     snr_db: float,
     num_blocks: int = 1,
     channel_type: str = "rayleigh",
+    paired_realization: Optional[PairedChannelRealization] = None,
     h_custom: Optional[torch.Tensor] = None,
+    z_custom: Optional[torch.Tensor] = None,
     seed: Optional[int] = None,
-    generator: Optional[torch.Generator] = None,
+    payload_generator: Optional[torch.Generator] = None,
 ) -> CodedBlockEvaluationResult:
     """Simulate complete LDPC-coded transmission chain over slow Rayleigh block fading.
 
     Chain:
         u -> LDPC Encoder -> Mapper -> Rayleigh Channel -> Equalizer -> Soft Demapper -> Decoder -> u_hat
+
+    Complex noise model:
+        n_w = sqrt(N0) * z   with z ~ CN(0, 1), E[|z|^2] = 1
 
     Parameters
     ----------
@@ -346,12 +514,16 @@ def simulate_coded_transmission(
         Number of transmission blocks (codewords) to evaluate.
     channel_type : str, default 'rayleigh'
         'rayleigh' or 'awgn'.
+    paired_realization : PairedChannelRealization, optional
+        Pre-generated paired physical channel realization (h, z).
     h_custom : torch.Tensor, optional
         Explicit channel realizations [num_blocks, 1].
+    z_custom : torch.Tensor, optional
+        Explicit standard noise realizations [num_blocks, block_symbols].
     seed : int, optional
         Deterministic master seed.
-    generator : torch.Generator, optional
-        Existing PyTorch generator.
+    payload_generator : torch.Generator, optional
+        RNG stream for information bits u.
 
     Returns
     -------
@@ -362,13 +534,13 @@ def simulate_coded_transmission(
     r_dtype = torch.float64 if modem.precision == "double" else torch.float32
     c_dtype = torch.complex128 if modem.precision == "double" else torch.complex64
 
-    gen = generator
-    if gen is None and seed is not None:
-        gen = torch.Generator(device=dev if dev.type == "cuda" else "cpu").manual_seed(seed)
+    # 1. Payload Generator for information bits u [num_blocks, k]
+    p_gen = payload_generator
+    if p_gen is None and seed is not None:
+        p_gen = torch.Generator(device="cpu").manual_seed(((seed * 1_000_003) + 101) & 0x7FFFFFFF)
 
-    # 1. Generate information bits u [num_blocks, k]
-    if gen is not None:
-        info_bits = torch.randint(0, 2, (num_blocks, modem.k), generator=gen, device=dev).to(r_dtype)
+    if p_gen is not None:
+        info_bits = torch.randint(0, 2, (num_blocks, modem.k), generator=p_gen, device="cpu").to(dtype=r_dtype, device=dev)
     else:
         info_bits = torch.randint(0, 2, (num_blocks, modem.k), device=dev).to(r_dtype)
 
@@ -379,24 +551,32 @@ def simulate_coded_transmission(
     x = modem.modulate(coded_bits)
 
     # 4. Physical Channel
-    # Channel noise variance N0 = 1 / db_to_lin(snr_db) (Es = 1)
+    # Noise variance N0 = 1 / db_to_lin(snr_db) (Es = 1)
     n0_val = 1.0 / db_to_lin(snr_db)
     n0 = torch.as_tensor(n0_val, dtype=r_dtype, device=dev)
 
-    if h_custom is not None:
+    if paired_realization is not None:
+        h = paired_realization.h.to(dtype=c_dtype, device=dev)
+        z = paired_realization.z.to(dtype=c_dtype, device=dev)
+    elif h_custom is not None and z_custom is not None:
         h = torch.as_tensor(h_custom, dtype=c_dtype, device=dev)
+        z = torch.as_tensor(z_custom, dtype=c_dtype, device=dev)
         if h.ndim == 1:
             h = h.unsqueeze(-1)
-    elif channel_type.lower() == "awgn":
-        h = torch.ones((num_blocks, 1), dtype=c_dtype, device=dev)
     else:
-        # Slow Rayleigh flat block fading: h ~ CN(0, 1), 1 complex coefficient per block
-        h = complex_normal([num_blocks, 1], precision=modem.precision, device=modem.device_str, generator=gen)
+        realization = generate_paired_channel_realization(
+            num_blocks=num_blocks,
+            block_symbols=modem.block_symbols,
+            master_seed=seed,
+            channel_type=channel_type,
+            precision=modem.precision,
+            device=dev,
+        )
+        h = realization.h
+        z = realization.z
 
-    # Noise vector n_w ~ CN(0, N0)
-    noise_std = math.sqrt(n0_val / 2.0)
-    raw_noise = complex_normal(x.shape, precision=modem.precision, device=modem.device_str, generator=gen)
-    noise = noise_std * raw_noise
+    # Physical noise scaling: n_w = sqrt(N0) * z   (E[|z|^2] = 1, E[|n_w|^2] = N0)
+    noise = torch.sqrt(n0) * z
 
     # Received signal y = h * x + noise
     y = h * x + noise
@@ -418,14 +598,14 @@ def simulate_coded_transmission(
     block_errors = int(np.sum(per_block_bit_errors > 0))
     bler = float(block_errors) / float(num_blocks)
 
-    eb_n0_db = modem.action.compute_eb_n0_db(snr_db)
+    eb_n0_db = modem.action.compute_eb_n0_db(snr_db, modem.block_symbols)
 
     return CodedBlockEvaluationResult(
         action_name=modem.action.name,
         modulation=modem.action.modulation,
-        code_rate=modem.action.code_rate,
+        code_rate=modem.effective_code_rate,
         bits_per_symbol=modem.bits_per_symbol,
-        spectral_efficiency=modem.spectral_efficiency,
+        spectral_efficiency=modem.effective_spectral_efficiency,
         info_bits_per_block=modem.k,
         coded_bits_per_block=modem.n,
         num_blocks=num_blocks,
@@ -446,18 +626,19 @@ def simulate_coded_transmission(
 class CodedBlockStats:
     """Online statistical accumulator for coded block Monte Carlo trials.
 
-    Explicitly implements block-level standard error calculation conforming to:
-        - BLER standard error: SE(BLER) = sqrt( BLER * (1 - BLER) / N_blocks )
-        - Information BER standard error: Sample standard deviation of per-block BERs / sqrt(N_blocks)
-        - 95% Confidence Intervals using k = 1.96
+    Supports candidate confidence interval methods for human review:
+        - Wald normal approximation (diagnostic baseline)
+        - Wilson score interval (asymmetric, stable at zero errors)
+        - Clopper-Pearson exact binomial interval (conservative coverage guarantee)
     """
 
-    def __init__(self, action: CodedAction, snr_db: float, k: int, n: int):
+    def __init__(self, action: CodedAction, snr_db: float, k: int, n: int, block_symbols: int = BLOCK_SYMBOLS_DEFAULT):
         self.action = action
         self.snr_db = float(snr_db)
         self.k = k
         self.n = n
-        self.eb_n0_db = action.compute_eb_n0_db(snr_db)
+        self.block_symbols = block_symbols
+        self.eb_n0_db = action.compute_eb_n0_db(snr_db, block_symbols)
 
         self.num_blocks: int = 0
         self.total_info_bits: int = 0
@@ -499,12 +680,17 @@ class CodedBlockStats:
         return float(self.block_errors) / float(self.num_blocks)
 
     @property
-    def bler_se(self) -> float:
-        """Codeword/transport-block Bernoulli standard error."""
+    def bler_se_wald(self) -> float:
+        """Codeword/transport-block Bernoulli standard error (Wald)."""
         if self.num_blocks <= 1:
             return 0.0
         b = self.bler
         return math.sqrt(max(0.0, b * (1.0 - b) / float(self.num_blocks)))
+
+    @property
+    def bler_se(self) -> float:
+        """Alias to bler_se_wald."""
+        return self.bler_se_wald
 
     @property
     def info_ber_se(self) -> float:
@@ -514,12 +700,49 @@ class CodedBlockStats:
         sample_var = self._block_ber_m2 / float(self.num_blocks - 1)
         return math.sqrt(max(0.0, sample_var / float(self.num_blocks)))
 
-    def bler_ci95(self, k: float = CONFIDENCE_K) -> Tuple[float, float]:
-        """95% Confidence Interval for BLER."""
-        se = self.bler_se
+    def bler_ci_wald(self, k: float = CONFIDENCE_K) -> Tuple[float, float]:
+        """Wald normal approximation CI for BLER."""
+        se = self.bler_se_wald
         low = max(0.0, self.bler - k * se)
         high = min(1.0, self.bler + k * se)
         return low, high
+
+    def bler_ci_wilson(self, k: float = CONFIDENCE_K) -> Tuple[float, float]:
+        """Wilson score interval for BLER (stable at zero errors)."""
+        n = self.num_blocks
+        if n == 0:
+            return 0.0, 1.0
+        p = self.bler
+        z = k
+        denom = 1.0 + (z ** 2) / float(n)
+        center = (p + (z ** 2) / (2.0 * float(n))) / denom
+        margin = (z / denom) * math.sqrt((p * (1.0 - p) / float(n)) + ((z ** 2) / (4.0 * float(n ** 2))))
+        low = max(0.0, center - margin)
+        high = min(1.0, center + margin)
+        return low, high
+
+    def bler_ci_clopper_pearson(self, confidence: float = 0.95) -> Tuple[float, float]:
+        """Exact Clopper-Pearson interval for BLER."""
+        n = self.num_blocks
+        x = self.block_errors
+        if n == 0:
+            return 0.0, 1.0
+        alpha = 1.0 - confidence
+        low = 0.0 if x == 0 else float(scipy.stats.beta.ppf(alpha / 2.0, x, n - x + 1))
+        high = 1.0 if x == n else float(scipy.stats.beta.ppf(1.0 - alpha / 2.0, x + 1, n - x))
+        return low, high
+
+    def bler_ci95(self, method: str = "wald") -> Tuple[float, float]:
+        """95% Confidence Interval for BLER under chosen method."""
+        m = method.lower()
+        if m == "wald":
+            return self.bler_ci_wald()
+        elif m == "wilson":
+            return self.bler_ci_wilson()
+        elif m in ("clopper_pearson", "exact"):
+            return self.bler_ci_clopper_pearson()
+        else:
+            raise ValueError(f"Unknown CI method: {method}. Choose from 'wald', 'wilson', 'clopper_pearson'")
 
     def info_ber_ci95(self, k: float = CONFIDENCE_K) -> Tuple[float, float]:
         """95% Confidence Interval for Information BER."""
@@ -529,13 +752,17 @@ class CodedBlockStats:
         return low, high
 
     def to_dict(self) -> Dict[str, Any]:
-        b_low, b_high = self.bler_ci95()
+        b_wald_low, b_wald_high = self.bler_ci_wald()
+        b_wilson_low, b_wilson_high = self.bler_ci_wilson()
+        b_cp_low, b_cp_high = self.bler_ci_clopper_pearson()
         i_low, i_high = self.info_ber_ci95()
+
         return {
             "action": self.action.name,
             "modulation": self.action.modulation,
-            "code_rate": self.action.code_rate,
-            "spectral_efficiency": self.action.spectral_efficiency,
+            "requested_code_rate": self.action.code_rate,
+            "effective_code_rate": float(self.k) / float(self.n),
+            "effective_spectral_efficiency": (float(self.k) / float(self.n)) * self.action.bits_per_symbol,
             "snr_db": self.snr_db,
             "eb_n0_db": self.eb_n0_db,
             "info_bits_per_block": self.k,
@@ -551,6 +778,10 @@ class CodedBlockStats:
             "block_errors": self.block_errors,
             "bler": self.bler,
             "bler_se": self.bler_se,
-            "bler_ci95_low": b_low,
-            "bler_ci95_high": b_high,
+            "bler_ci95_low": b_wald_low,
+            "bler_ci95_high": b_wald_high,
+            "bler_wilson_ci95_low": b_wilson_low,
+            "bler_wilson_ci95_high": b_wilson_high,
+            "bler_clopper_pearson_ci95_low": b_cp_low,
+            "bler_clopper_pearson_ci95_high": b_cp_high,
         }

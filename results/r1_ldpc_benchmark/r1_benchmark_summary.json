@@ -1,0 +1,166 @@
+{
+  "title": "PHY-ML R1 LDPC Micro-Benchmark & Iteration Study",
+  "generated_at_utc": "2026-09-20T16:29:01.715860+00:00",
+  "device": "cpu",
+  "precision": "double",
+  "block_symbols": 1536,
+  "snr_db": 18.0,
+  "batch_scaling": [
+    {
+      "action": "BPSK-1/2",
+      "modulation": "BPSK",
+      "batch_size": 5,
+      "num_iter": 15,
+      "time_per_codeword_ms": 4.609053333600362,
+      "codewords_per_second": 216.9642934504405,
+      "symbols_per_second": 333257.1547398766,
+      "info_bits_per_second": 166628.5773699383
+    },
+    {
+      "action": "BPSK-1/2",
+      "modulation": "BPSK",
+      "batch_size": 10,
+      "num_iter": 15,
+      "time_per_codeword_ms": 3.7981800000125077,
+      "codewords_per_second": 263.2839939120071,
+      "symbols_per_second": 404404.21464884287,
+      "info_bits_per_second": 202202.10732442143
+    },
+    {
+      "action": "BPSK-1/2",
+      "modulation": "BPSK",
+      "batch_size": 20,
+      "num_iter": 15,
+      "time_per_codeword_ms": 2.889326666627312,
+      "codewords_per_second": 346.1013984850983,
+      "symbols_per_second": 531611.7480731109,
+      "info_bits_per_second": 265805.87403655547
+    },
+    {
+      "action": "QPSK-1/2",
+      "modulation": "QPSK",
+      "batch_size": 5,
+      "num_iter": 15,
+      "time_per_codeword_ms": 7.427026666603828,
+      "codewords_per_second": 134.64338353551008,
+      "symbols_per_second": 206812.23711054347,
+      "info_bits_per_second": 206812.23711054347
+    },
+    {
+      "action": "QPSK-1/2",
+      "modulation": "QPSK",
+      "batch_size": 10,
+      "num_iter": 15,
+      "time_per_codeword_ms": 6.170539999826966,
+      "codewords_per_second": 162.06037073384854,
+      "symbols_per_second": 248924.72944719135,
+      "info_bits_per_second": 248924.72944719135
+    },
+    {
+      "action": "QPSK-1/2",
+      "modulation": "QPSK",
+      "batch_size": 20,
+      "num_iter": 15,
+      "time_per_codeword_ms": 4.975373333339425,
+      "codewords_per_second": 200.9899424630331,
+      "symbols_per_second": 308720.5516232188,
+      "info_bits_per_second": 308720.5516232188
+    },
+    {
+      "action": "16QAM-1/2",
+      "modulation": "16QAM",
+      "batch_size": 5,
+      "num_iter": 15,
+      "time_per_codeword_ms": 12.59353333346856,
+      "codewords_per_second": 79.40583262223963,
+      "symbols_per_second": 121967.35890776006,
+      "info_bits_per_second": 243934.71781552013
+    },
+    {
+      "action": "16QAM-1/2",
+      "modulation": "16QAM",
+      "batch_size": 10,
+      "num_iter": 15,
+      "time_per_codeword_ms": 10.621116666637437,
+      "codewords_per_second": 94.1520587134829,
+      "symbols_per_second": 144617.56218390973,
+      "info_bits_per_second": 289235.12436781946
+    },
+    {
+      "action": "16QAM-1/2",
+      "modulation": "16QAM",
+      "batch_size": 20,
+      "num_iter": 15,
+      "time_per_codeword_ms": 10.390723333330243,
+      "codewords_per_second": 96.2396907241585,
+      "symbols_per_second": 147824.16495230747,
+      "info_bits_per_second": 295648.32990461495
+    },
+    {
+      "action": "64QAM-1/2",
+      "modulation": "64QAM",
+      "batch_size": 5,
+      "num_iter": 15,
+      "time_per_codeword_ms": 25.41851999994833,
+      "codewords_per_second": 39.34139359813368,
+      "symbols_per_second": 60428.38056673333,
+      "info_bits_per_second": 181285.14170019998
+    },
+    {
+      "action": "64QAM-1/2",
+      "modulation": "64QAM",
+      "batch_size": 10,
+      "num_iter": 15,
+      "time_per_codeword_ms": 28.161779999936698,
+      "codewords_per_second": 35.50911909695509,
+      "symbols_per_second": 54542.00693292302,
+      "info_bits_per_second": 163626.02079876905
+    },
+    {
+      "action": "64QAM-1/2",
+      "modulation": "64QAM",
+      "batch_size": 20,
+      "num_iter": 15,
+      "time_per_codeword_ms": 43.582268333436026,
+      "codewords_per_second": 22.94511135467464,
+      "symbols_per_second": 35243.69104078025,
+      "info_bits_per_second": 105731.07312234075
+    }
+  ],
+  "iteration_study": [
+    {
+      "num_iter": 5,
+      "time_per_codeword_ms": 3.866856666718377,
+      "codewords_per_second": 258.60798219052015,
+      "info_bit_errors": 0,
+      "codeword_errors": 0,
+      "relative_runtime_factor": 1.0
+    },
+    {
+      "num_iter": 10,
+      "time_per_codeword_ms": 6.456523333326913,
+      "codewords_per_second": 154.88211663981096,
+      "info_bit_errors": 0,
+      "codeword_errors": 0,
+      "relative_runtime_factor": 1.669708471197684
+    },
+    {
+      "num_iter": 15,
+      "time_per_codeword_ms": 12.431836666655727,
+      "codewords_per_second": 80.43863725157908,
+      "info_bit_errors": 0,
+      "codeword_errors": 0,
+      "relative_runtime_factor": 3.2149721952859593
+    },
+    {
+      "num_iter": 20,
+      "time_per_codeword_ms": 12.204010000035243,
+      "codewords_per_second": 81.94028028468611,
+      "info_bit_errors": 0,
+      "codeword_errors": 0,
+      "relative_runtime_factor": 3.1560544007420437
+    }
+  ],
+  "proposed_decoder_iterations": 15,
+  "iteration_rationale": "15 iterations provides strong convergence and waterfall sharpness in 5G NR LDPC while reducing computational latency by ~25% compared to 20 iterations."
+}

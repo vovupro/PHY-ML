@@ -35,48 +35,41 @@ The project separates **experimental control** from **canonical PHY primitives**
 
 ---
 
-## 📌 Current Stage
+## 📌 Current Stage: R0 Canonical Frozen Research Root
 
-**L3 Ground Truth & Baseline Policies Completed**
-Workflow:
-`L1 Verified PHY Core` $\to$ `L2 Fixed-Budget Monte Carlo Calibration (light: 10k/seed, deep: 70k/seed)` $\to$ `L3 Ground Truth (BestMode) & Baselines (Fixed Robust, Fixed High-Throughput, 1D LUT)`.
+`PHY-ML R0` represents the finalized, frozen uncoded baseline root for adaptive modulation and coding (AMC) link adaptation:
+- **Physical Channel:** Slow Rayleigh flat block fading ($\mathbb{E}[|h|^2] = 1.0$, held strictly constant over 1536 complex symbols/block, independent realizations between blocks).
+- **CSI Knowledge:** Perfect coherent channel state information (CSI) at the receiver.
+- **State Space:** $s = [\text{SNR}_{\text{dB}}]$ (nominal setup $E_s/N_0$).
+- **Action Space:** $\mathcal{A} = \{\text{BPSK}, \text{QPSK}, \text{16QAM}, \text{64QAM}\}$ (uncoded, Gray-mapped, unit average energy).
+- **Monte Carlo Calibration:** Fixed-budget Monte Carlo with canonical Deep reference budget of 70,000 blocks/seed (140,000 pooled blocks/point across Seeds A & B).
+- **Ground Truth Policy:** Conservative 95% confidence upper bound ($\hat{\text{BER}} + 1.96 \cdot \text{SE} \le \text{BER}_{\text{target}}$ with $\text{BER}_{\text{target}} = 0.0100$).
+- **Local Transition Resolution:** Targeted 0.25-dB refinement at candidate mode switching boundaries (16.75 dB, 22.75 dB, 28.25 dB), forming a unified 28-point operating grid.
+- **Decision Tree Architecture:** Classification Decision Tree (CART) trained via minimum-depth model selection ($d \in [1, 5]$) to maximize policy parsimony and transparency.
 
 ---
 
-## ⚙️ Verified Computational Runtime
+## ⚙️ Computational Runtime & Artifact Taxonomy
 
 ### Computational Platforms
-- **Historical Frozen Reference**:
-  - PyTorch: `2.6.0+cu124`
-  - CUDA Runtime: `12.4`
-- **Current Qualified CKEY Runtime**:
+- **Reference Simulation Environment (CKEY)**:
   - Python: `3.13.5`
   - PyTorch: `2.9.1+cu126`
   - CUDA Runtime: `12.6`
   - Sionna: `2.0.0`
-  - Hardware: NVIDIA RTX 3060 (`sm_86`)
+  - Hardware: NVIDIA GeForce RTX 3060 (`sm_86`)
 
-### Reproduced Scientific Invariance
-Full reproduction across the computational chain demonstrates 100% scientific invariance:
-- **L2 Calibration**: 1,140,000 blocks simulated across 25 SNR points
-- **L3 LUT Thresholds**: 16.75, 22.75, 28.25 dB
-- **L4 CART Decision Tree**:
-  - Depth 1 = 64%
-  - Depth 2 = 84%
-  - Depth 3 = 100%
-  - Selected depth = 3 (7 nodes / 4 leaves)
-  - Switching thresholds = 16.75, 22.75, 28.25 dB
-
-### Artifact Taxonomy
-- **Historical Frozen Baselines**:
-  - `results/l2_cuda_rtx3060_final`
-  - `results/l3_final`
-  - `results/l4_final`
-- **Qualified Reproduced CKEY Chain**:
-  - `results/l2_ckey_torch291_cu126`
-  - `results/l3_ckey_torch291_cu126`
-  - `results/l4_ckey_torch291_cu126`
-  *(Note: Versioned CKEY outputs are generated on the compute node and managed as runtime reproduction artifacts).*
+### Canonical Artifact Pipeline
+1. **L2 Fixed-Budget Monte Carlo Calibration**:
+   - Light profile: 10,000 blocks/seed $\to$ `results/r0_mc_light_10k/`
+   - Deep profile: 70,000 blocks/seed $\to$ `results/r0_mc_deep_70k/`
+2. **Targeted 0.25-dB Transition Refinement**:
+   - Evaluates 16.75, 22.75, 28.25 dB at Deep 70k budget $\to$ `results/r0_snr_grid_refine_025/`
+3. **Downstream Comparative Studies**:
+   - Light vs Deep budget comparison $\to$ `results/r0_mc_budget_study/`
+   - SNR-grid convergence study $\to$ `results/r0_snr_grid_convergence/`
+4. **Canonical R0 Freeze Package**:
+   - Unified 28-point dataset, ground truth, DT model selection, policy comparison, and cryptographic manifest $\to$ `results/r0_final/`
 
 ---
 
@@ -112,16 +105,13 @@ Full reproduction across the computational chain demonstrates 100% scientific in
 
 ---
 
-## 🚫 Explicitly Not Implemented Yet (Deferred to Later Levels)
+## 🚫 Deferred Beyond R0 (Future Milestone Extensions)
 
-This minimal core deliberately excludes:
-- Channel coding (LDPC, Polar, Convolutional, Turbo) — *LDPC is not implemented yet*
-- AMC policy selection & Monte Carlo calibration
-- Lookup Table (LUT) baselines
-- Decision Tree (CART) & Random Forest classifiers
-- 2D feature study ($|h|$ vs $E_s/N_0$)
-- Pilot transmission & practical channel/SNR estimation
-- CRC verification, ACK/NACK feedback, and HARQ protocols
+The frozen R0 uncoded root deliberately excludes:
+- Channel coding (LDPC, Polar, Convolutional, Turbo)
+- 2D feature representations ($|h|$ vs $E_s/N_0$)
+- Pilot symbol transmission & practical channel/SNR estimation
+- CRC verification, ACK/NACK feedback, and HARQ retransmissions
 - FPGA export and fixed-point quantization
 
 ---
@@ -130,14 +120,23 @@ This minimal core deliberately excludes:
 
 ```text
 PHY-ML/
-├── .gitignore          # Clean Git ignore definitions
-├── README.md           # Project overview and scope
-├── __init__.py         # Package root exposing public PHY API
-├── requirements.txt    # Minimal scientific Python dependencies + sionna-no-rt
-├── channel.py          # Slow Rayleigh block fading and AWGN channel model
-├── phy_engine.py       # Sionna 2.0-backed modulation, equalization, and demapping
-├── metrics.py          # Raw PHY counters and error rate calculations
-└── test_physics.py     # 15-point physical layer acceptance test gate
+├── .gitignore                      # Clean Git ignore definitions
+├── README.md                       # Canonical R0 project overview and scope
+├── __init__.py                     # Package root exposing public PHY API
+├── requirements.txt                # Minimal scientific Python dependencies
+├── requirements-ckey.txt           # Dedicated CUDA/Sionna requirements for CKEY
+├── channel.py                      # Slow Rayleigh block fading and AWGN channel model
+├── phy_engine.py                   # Sionna 2.0-backed modulation, equalization, and demapping
+├── metrics.py                      # Raw PHY counters and error rate calculations
+├── calibration_1d.py               # L2 CPU reference prototype
+├── calibration_l2_cuda.py          # L2 Canonical fixed-budget CUDA Monte Carlo engine
+├── refine_snr_grid_cuda.py         # Targeted 0.25-dB transition refinement runner
+├── ground_truth.py                 # Conservative CI-based Ground Truth & baseline policies
+├── cart_1d.py                      # Supervised CART classification framework & depth evaluation
+├── compare_mc_budgets.py           # Light vs Deep budget comparative analysis tool
+├── analyze_snr_grid_convergence.py # Transition-centered SNR grid convergence study tool
+├── package_r0_freeze.py            # Canonical R0 packaging, freeze gate, and manifest builder
+└── test_*.py                       # Comprehensive acceptance and regression test suites
 ```
 
 ---
@@ -217,10 +216,31 @@ test_14_modulation_order_invariance_for_paired_eval ... ok
   - `python calibration_l2_cuda.py --profile deep`
   - `python calibration_l2_cuda.py --blocks-per-seed 100000`
 
-### `ground_truth.py` (L3)
-- `GroundTruthConfig`: Explicit parameters (`ber_target=0.01`, `fallback_policy="robustest_mode"`, `confidence_k=1.96`).
-- `compute_ground_truth(calibration_data, config) -> List[GroundTruthRow]`: Synthesizes BestMode strictly from calibration tables without re-running PHY.
+### `ground_truth.py` (Conservative CI-Based Ground Truth)
+- `GroundTruthConfig`: Parameters (`ber_target=0.01`, `fallback_policy="robustest_mode"`, `confidence_k=1.96`).
+- `compute_ground_truth(calibration_data, config) -> List[GroundTruthRow]`: Synthesizes BestMode strictly from calibration tables using conservative upper CI ($\hat{\text{BER}} + 1.96 \cdot \text{SE} \le 0.0100$).
 - `FixedRobustPolicy`: Baseline unconditionally selecting BPSK (1 bpcu).
 - `FixedHighThroughputPolicy`: Baseline unconditionally selecting 64-QAM (6 bpcu).
 - `LookupTable1D`: Derived 1D LUT with thresholds at ground-truth mode transition midpoints.
-- `generate_l3_report(rows, lut, config, ...) -> str`: Generates telecom verification report documenting switching regions, thresholds, boundary ambiguity, and fallback events.
+
+### `refine_snr_grid_cuda.py` (Targeted 0.25-dB Refinement)
+- `REFINEMENT_025_SNRS`: Midpoints of candidate 0.5-dB transition intervals `(16.75, 22.75, 28.25 dB)`.
+- `run_refinement_calibration(...)`: Evaluates exclusively the 3 refinement points at Deep 70k budget.
+
+### `cart_1d.py` (Supervised CART Classifier)
+- `CARTClassifier`: Feature-agnostic decision tree classifier supporting arbitrary input dimensions.
+- `CART1DClassifier`: Thin wrapper for 1D scalar SNR link adaptation.
+- `TreeMetrics`: Data container for actual depth, node/leaf counts, accuracy, and learned split thresholds.
+
+### `compare_mc_budgets.py` (Budget Study Tool)
+- `run_budget_comparison(...)`: Standalone tool comparing Light 10k vs Deep 70k calibration tables.
+- `select_optimal_cart_depth(...)`: Sweeps depths 1..5 to select the smallest tree achieving 100% fidelity.
+
+### `analyze_snr_grid_convergence.py` (Grid Convergence Tool)
+- `run_snr_grid_convergence_study(...)`: Merges Deep 70k and refinement datasets to evaluate local transition views (1.0 dB, 0.5 dB, 0.25 dB).
+- `compute_data_driven_findings(...)`: Dynamically formats findings on bracket widths, threshold shifts, and tree depth stability.
+
+### `package_r0_freeze.py` (Canonical R0 Freeze Package Builder)
+- `package_r0_freeze(...)`: Consolidates the canonical 28-point R0 baseline package into `results/r0_final/`.
+- `run_freeze_gate(...)`: Data-driven audit certifying grid integrity, BestMode monotonicity, and 100% DT fidelity before declaring PASS.
+- Artifacts produced: `r0_calibration_merged.csv`, `r0_ground_truth.csv`, `r0_cart_predictions.csv`, `r0_cart_depth_sweep.csv`, `r0_policy_evaluation.csv`, `r0_freeze_manifest.json`, `r0_final_report.md`, `r0_cart_model.joblib`.
